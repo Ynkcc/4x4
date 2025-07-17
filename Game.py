@@ -47,7 +47,7 @@ class GameEnvironment(gym.Env):
         PieceType.A: 4, PieceType.B: 10, PieceType.C: 10,
         PieceType.D: 10, PieceType.E: 10, PieceType.F: 20, PieceType.G: 30
     }
-    # 每种棋子的总数，用于归一化
+    # 每种棋子的总数，用于新的二元死亡棋子表示
     PIECE_MAX_COUNTS = {
         PieceType.A: 2, PieceType.B: 1, PieceType.C: 1,
         PieceType.D: 1, PieceType.E: 1, PieceType.F: 1, PieceType.G: 1
@@ -59,9 +59,20 @@ class GameEnvironment(gym.Env):
         # --- Gymnasium所需的环境定义 ---
         self.render_mode = render_mode
 
-        # 状态向量大小
-        self.state_size = (self.NUM_PIECE_TYPES * self.TOTAL_POSITIONS * 2) + \
-                          self.TOTAL_POSITIONS + (self.NUM_PIECE_TYPES * 2) + 2 + 1
+        # --- 状态向量大小计算 (已更新) ---
+        dead_piece_counts_size_per_player = sum(self.PIECE_MAX_COUNTS.values())
+        self.dead_piece_counts_total_size = dead_piece_counts_size_per_player * 2
+
+        self.state_size = (
+            (self.NUM_PIECE_TYPES * self.TOTAL_POSITIONS * 2) +  # 我方和对手的棋子位置图层
+            self.TOTAL_POSITIONS +                              # 暗棋位置图层
+            self.TOTAL_POSITIONS +                              # 对手威胁图层 (新)
+            self.dead_piece_counts_total_size +                 # 死亡棋子计数 (新表示)
+            2 +                                                 # 双方分数
+            1 +                                                 # 连续未吃子步数
+            self.ACTION_SPACE_SIZE +                            # 行动机会向量 (新)
+            self.ACTION_SPACE_SIZE                              # 行动威胁向量 (新)
+        )
                           
         # 观测空间 (状态向量)
         self.observation_space = spaces.Box(
@@ -83,16 +94,19 @@ class GameEnvironment(gym.Env):
         self.unrevealed_pieces_pos = set() 
         self.player_pieces_pos = {-1: set(), 1: set()}
 
-        # --- 状态向量索引计算 ---
+        # --- 状态向量索引计算 (已更新) ---
         self._state_vector = np.zeros(self.state_size, dtype=np.float32)
 
         self._my_pieces_plane_start_idx = 0
         self._opponent_pieces_plane_start_idx = self.NUM_PIECE_TYPES * self.TOTAL_POSITIONS
         self._hidden_pieces_plane_start_idx = self._opponent_pieces_plane_start_idx + self.NUM_PIECE_TYPES * self.TOTAL_POSITIONS
-        self._my_dead_count_start_idx = self._hidden_pieces_plane_start_idx + self.TOTAL_POSITIONS
-        self._opponent_dead_count_start_idx = self._my_dead_count_start_idx + self.NUM_PIECE_TYPES
-        self._scores_start_idx = self._opponent_dead_count_start_idx + self.NUM_PIECE_TYPES
+        self._threat_plane_start_idx = self._hidden_pieces_plane_start_idx + self.TOTAL_POSITIONS
+        self._my_dead_count_start_idx = self._threat_plane_start_idx + self.TOTAL_POSITIONS
+        self._opponent_dead_count_start_idx = self._my_dead_count_start_idx + dead_piece_counts_size_per_player
+        self._scores_start_idx = self._opponent_dead_count_start_idx + dead_piece_counts_size_per_player
         self._move_counter_idx = self._scores_start_idx + 2
+        self._opportunity_vector_start_idx = self._move_counter_idx + 1
+        self._threat_vector_start_idx = self._opportunity_vector_start_idx + self.ACTION_SPACE_SIZE
 
 
     def _initialize_board(self):
@@ -167,13 +181,14 @@ class GameEnvironment(gym.Env):
 
     def get_state(self):
         """
-        获取当前游戏状态，返回一个特征向量。
+        获取当前游戏状态，返回一个更新后的、包含新图层和向量的特征向量。
         """
         current_p = self.current_player
         opponent_p = -current_p
 
         self._state_vector.fill(0.0)
 
+        # 填充棋子位置图层 (我方, 对手, 暗棋)
         for r, c in self.unrevealed_pieces_pos:
             pos_flat_idx = r * self.BOARD_COLS + c
             idx = self._hidden_pieces_plane_start_idx + pos_flat_idx
@@ -192,29 +207,48 @@ class GameEnvironment(gym.Env):
             pos_flat_idx = r * self.BOARD_COLS + c
             idx = self._opponent_pieces_plane_start_idx + piece_type_idx * self.TOTAL_POSITIONS + pos_flat_idx
             self._state_vector[idx] = 1.0
+
+        # --- 新增: 填充对手威胁图层 ---
+        threat_plane = self._get_threat_plane(opponent_p)
+        self._state_vector[self._threat_plane_start_idx : self._my_dead_count_start_idx] = threat_plane
             
+        # --- 修改: 填充死亡棋子二元计数 ---
         my_dead_counts = {pt: 0 for pt in PieceType}
         for p in self.dead_pieces[current_p]:
             my_dead_counts[p.piece_type] += 1
-        for piece_type, count in my_dead_counts.items():
+        
+        current_idx = self._my_dead_count_start_idx
+        for piece_type in sorted(PieceType, key=lambda pt: pt.value): # 保证顺序
             max_count = self.PIECE_MAX_COUNTS[piece_type]
-            idx = self._my_dead_count_start_idx + piece_type.value
-            self._state_vector[idx] = count / max_count if max_count > 0 else 0
+            dead_count = my_dead_counts[piece_type]
+            for i in range(max_count):
+                self._state_vector[current_idx + i] = 1.0 if i < dead_count else 0.0
+            current_idx += max_count
 
         opp_dead_counts = {pt: 0 for pt in PieceType}
         for p in self.dead_pieces[opponent_p]:
             opp_dead_counts[p.piece_type] += 1
-        for piece_type, count in opp_dead_counts.items():
+
+        current_idx = self._opponent_dead_count_start_idx
+        for piece_type in sorted(PieceType, key=lambda pt: pt.value): # 保证顺序
             max_count = self.PIECE_MAX_COUNTS[piece_type]
-            idx = self._opponent_dead_count_start_idx + piece_type.value
-            self._state_vector[idx] = count / max_count if max_count > 0 else 0
-            
+            dead_count = opp_dead_counts[piece_type]
+            for i in range(max_count):
+                self._state_vector[current_idx + i] = 1.0 if i < dead_count else 0.0
+            current_idx += max_count
+
+        # 填充分数和步数计数器
         score_norm = self.WINNING_SCORE if self.WINNING_SCORE > 0 else 1.0
         self._state_vector[self._scores_start_idx] = self.scores[current_p] / score_norm
         self._state_vector[self._scores_start_idx + 1] = self.scores[opponent_p] / score_norm
 
         move_norm = self.MAX_CONSECUTIVE_MOVES if self.MAX_CONSECUTIVE_MOVES > 0 else 1.0
         self._state_vector[self._move_counter_idx] = self.move_counter / move_norm
+
+        # --- 新增: 填充行动机会和威胁向量 ---
+        opportunity_vector, threat_vector = self._get_action_vectors()
+        self._state_vector[self._opportunity_vector_start_idx : self._threat_vector_start_idx] = opportunity_vector
+        self._state_vector[self._threat_vector_start_idx:] = threat_vector
         
         return self._state_vector.copy() #这里需要一个深拷贝，不要删除此条注释
 
@@ -224,8 +258,6 @@ class GameEnvironment(gym.Env):
         执行一个动作，更新游戏状态，符合 Gymnasium API。
         返回: (observation, reward, terminated, truncated, info)
         """
-        # --- 本次修改: 引入时间惩罚 ---
-        # 无论执行什么动作，都先施加一个微小的负奖励，鼓励模型尽快获胜
         reward = -0.0005
 
         pos_idx = action_index // 5
@@ -241,7 +273,6 @@ class GameEnvironment(gym.Env):
         if action_sub_idx == 4:
             self.reveal(from_pos)
             self.move_counter = 0
-            # 翻棋的额外奖励会与时间惩罚相加
             reward += 0.0005
         else:
             d_row, d_col = 0, 0
@@ -259,26 +290,20 @@ class GameEnvironment(gym.Env):
                     raise ValueError(f"炮从 {from_pos} 的移动/攻击路径无效")
                 
                 raw_reward = self.attack(from_pos, to_pos)
-                # 吃子的额外奖励会与时间惩罚相加
                 reward += raw_reward / self.WINNING_SCORE if self.WINNING_SCORE > 0 else raw_reward
                 self.move_counter = 0
             # 其他棋子的移动/攻击逻辑
             else:
                 to_pos = (row + d_row, col + d_col)
                 target = self.board[to_pos[0], to_pos[1]]
-                # 移动到空格
                 if target is None:
                     self.move(from_pos, to_pos)
                     self.move_counter += 1
-                    # 移动到空格只有时间惩罚，不再是0
-                # 攻击
                 else:
                     raw_reward = self.attack(from_pos, to_pos)
-                    # 吃子的额外奖励会与时间惩罚相加
                     reward += raw_reward / self.WINNING_SCORE if self.WINNING_SCORE > 0 else raw_reward
                     self.move_counter = 0
         
-        # --- 检查游戏结束条件 ---
         terminated = False
         truncated = False
         winner = None
@@ -290,20 +315,18 @@ class GameEnvironment(gym.Env):
             winner = -1
             terminated = True
         elif self.move_counter >= self.MAX_CONSECUTIVE_MOVES:
-            winner = 0 # 平局
-            truncated = True # 因达到最大步数而截断
+            winner = 0 
+            truncated = True
 
         self.current_player = -self.current_player
         
-        # 检查新玩家是否有合法动作
         if not terminated and not truncated and np.sum(self.action_masks()) == 0:
-            winner = -self.current_player # 当前玩家无棋可走，对方获胜
+            winner = -self.current_player
             terminated = True
             
         info['winner'] = winner
         info['action_mask'] = self.action_masks()
         
-        # 如果需要，在 episode 结束时渲染
         if terminated or truncated:
             if self.render_mode == "human":
                 self.render()
@@ -334,13 +357,10 @@ class GameEnvironment(gym.Env):
                     print("    |", end="")
                 else:
                     if not piece.revealed:
-                         # 暗棋
                         print(f" \033[90m暗\033[0m  |", end="")
                     elif piece.player == 1:
-                        # 红方: 红色
                         print(f" \033[91m{red_map[piece.piece_type]}\033[0m  |", end="")
-                    else: # player == -1
-                        # 黑方: 蓝色 (在暗色背景终端上更清晰)
+                    else:
                         print(f" \033[94m{black_map[piece.piece_type]}\033[0m  |", end="")
             print(f"  Row {r}")
         print("-" * (self.BOARD_COLS * 5 + 1))
@@ -439,6 +459,110 @@ class GameEnvironment(gym.Env):
                 else:
                     return (r_check, c_check)
         return None
+
+    # --- 新增和修改的辅助函数 ---
+
+    def _get_threat_plane(self, player):
+        """计算指定玩家的威胁图层。"""
+        threat_plane = np.zeros(self.TOTAL_POSITIONS, dtype=np.float32)
+        for r_from, c_from in self.player_pieces_pos[player]:
+            piece = self.board[r_from, c_from]
+            if not piece.revealed: continue
+
+            if piece.piece_type == PieceType.B:  # 炮
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    target_pos = self._get_cannon_target((r_from, c_from), (dr, dc))
+                    if target_pos:
+                        pos_flat_idx = target_pos[0] * self.BOARD_COLS + target_pos[1]
+                        threat_plane[pos_flat_idx] = 1.0
+            else:  # 其他棋子
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    r_to, c_to = r_from + dr, c_from + dc
+                    if (0 <= r_to < self.BOARD_ROWS and 0 <= c_to < self.BOARD_COLS):
+                        pos_flat_idx = r_to * self.BOARD_COLS + c_to
+                        threat_plane[pos_flat_idx] = 1.0
+        return threat_plane
+
+    def _is_position_threatened_after_move(self, piece_to_move, to_pos, from_pos, by_player):
+        """检查在一次移动后，棋子在目标位置是否会受到威胁。"""
+        for r_opp, c_opp in self.player_pieces_pos[by_player]:
+            opp_piece = self.board[r_opp, c_opp]
+            if not opp_piece.revealed:
+                continue
+            
+            # 检查普通棋子攻击
+            if opp_piece.piece_type != PieceType.B:
+                if abs(to_pos[0] - r_opp) + abs(to_pos[1] - c_opp) == 1:
+                    if self.can_attack(opp_piece, piece_to_move):
+                        return True
+            # 检查炮攻击
+            else:
+                if not (r_opp == to_pos[0] or c_opp == to_pos[1]):
+                    continue
+
+                mount_count = 0
+                if r_opp == to_pos[0]:  # 同一行
+                    start_col, end_col = min(c_opp, to_pos[1]), max(c_opp, to_pos[1])
+                    for c in range(start_col + 1, end_col):
+                        if (r_opp, c) == from_pos: continue
+                        if self.board[r_opp, c] is not None:
+                            mount_count += 1
+                else:  # 同一列
+                    start_row, end_row = min(r_opp, to_pos[0]), max(r_opp, to_pos[0])
+                    for r in range(start_row + 1, end_row):
+                        if (r, c_opp) == from_pos: continue
+                        if self.board[r, c_opp] is not None:
+                            mount_count += 1
+                
+                if mount_count == 1:
+                    return True
+        return False
+
+    def _get_action_vectors(self):
+        """计算行动机会和行动威胁向量。"""
+        action_mask = self.action_masks()
+        opportunity_vector = np.zeros(self.ACTION_SPACE_SIZE, dtype=np.float32)
+        threat_vector = np.zeros(self.ACTION_SPACE_SIZE, dtype=np.float32)
+        
+        current_p = self.current_player
+        opponent_p = -current_p
+
+        valid_action_indices = np.where(action_mask == 1)[0]
+
+        for action_index in valid_action_indices:
+            pos_idx = action_index // 5
+            action_sub_idx = action_index % 5
+            r_from = pos_idx // self.BOARD_COLS
+            c_from = pos_idx % self.BOARD_COLS
+            from_pos = (r_from, c_from)
+
+            if action_sub_idx == 4:  # 翻棋
+                continue
+
+            moving_piece = self.board[r_from, c_from]
+            
+            to_pos = None
+            is_capture = False
+            
+            dr, dc = [(-1, 0), (1, 0), (0, -1), (0, 1)][action_sub_idx]
+
+            if moving_piece.piece_type == PieceType.B:  # 炮
+                to_pos = self._get_cannon_target(from_pos, (dr, dc))
+                if to_pos:
+                    is_capture = True
+            else:  # 其他棋子
+                to_pos = (r_from + dr, c_from + dc)
+                target_piece = self.board[to_pos[0], to_pos[1]]
+                if target_piece is not None:
+                    is_capture = True
+            
+            if is_capture:
+                opportunity_vector[action_index] = 1.0
+
+            if self._is_position_threatened_after_move(moving_piece, to_pos, from_pos, opponent_p):
+                threat_vector[action_index] = 1.0
+                
+        return opportunity_vector, threat_vector
 
 
     def action_masks(self):
