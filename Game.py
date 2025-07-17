@@ -226,7 +226,7 @@ class GameEnvironment(gym.Env):
         """
         # --- 本次修改: 引入时间惩罚 ---
         # 无论执行什么动作，都先施加一个微小的负奖励，鼓励模型尽快获胜
-        reward = -0.005
+        reward = -0.0005
 
         pos_idx = action_index // 5
         action_sub_idx = action_index % 5
@@ -242,7 +242,7 @@ class GameEnvironment(gym.Env):
             self.reveal(from_pos)
             self.move_counter = 0
             # 翻棋的额外奖励会与时间惩罚相加
-            reward += 0.005
+            reward += 0.0005
         else:
             d_row, d_col = 0, 0
             if action_sub_idx == 0: d_row = -1
