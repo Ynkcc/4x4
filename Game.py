@@ -1,4 +1,4 @@
-# Game.py (Bitboard Version - Refactoring Part 3 Complete)
+# Game.py (Bitboard Version - Refactoring Part 5 Complete)
 
 import random
 from enum import Enum
@@ -19,6 +19,12 @@ def ULL(x):
     """一个帮助函数，用于创建一个Bitboard（无符号长整型），仅将第x位置为1。"""
     return 1 << x
 
+# 定义棋盘边界的Bitboard掩码，用于在生成走法时防止棋子“穿越”棋盘边界。
+FILE_A = sum(ULL(i) for i in [0, 4, 8, 12])  # 第1列 (A列)
+FILE_D = sum(ULL(i) for i in [3, 7, 11, 15]) # 第4列 (D列)
+NOT_FILE_A = ~FILE_A # 按位取反，得到所有不是第1列的格子
+NOT_FILE_D = ~FILE_D # 按位取反，得到所有不是第4列的格子
+
 # 定义走法类型的枚举
 ACTION_TYPE_MOVE = 0
 ACTION_TYPE_REVEAL = 1
@@ -33,7 +39,7 @@ class PieceType(Enum):
     A = 0; B = 1; C = 2; D = 3; E = 4; F = 5; G = 6 # 兵/卒, 炮, 马, 车, 象, 士, 将
 
 class Piece:
-    """棋子对象，仅存储棋子本身的属性（类型，玩家，是否翻开）。"""
+    """棋子对象，仅用于初始化、翻棋和被炮攻击时的类型查询。"""
     def __init__(self, piece_type, player):
         self.piece_type, self.player, self.revealed = piece_type, player, False
     def __repr__(self):
@@ -49,7 +55,6 @@ class GameEnvironment(gym.Env):
     # --- 游戏核心常量 ---
     BOARD_ROWS, BOARD_COLS, NUM_PIECE_TYPES = 4, 4, 7
     TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
-    # 动作空间: 16个翻棋动作 + (16个位置 * 4个方向的移动) = 16 + 64 = 80
     REVEAL_ACTIONS_COUNT = TOTAL_POSITIONS
     MOVE_ACTIONS_COUNT = TOTAL_POSITIONS * 4
     ACTION_SPACE_SIZE = REVEAL_ACTIONS_COUNT + MOVE_ACTIONS_COUNT
@@ -63,7 +68,6 @@ class GameEnvironment(gym.Env):
         super().__init__()
         self.render_mode = render_mode
         
-        # --- Gym环境所需的状态和动作空间定义 ---
         my_pieces_plane_size = self.NUM_PIECE_TYPES * self.TOTAL_POSITIONS
         opponent_pieces_plane_size = self.NUM_PIECE_TYPES * self.TOTAL_POSITIONS
         hidden_pieces_plane_size = self.TOTAL_POSITIONS
@@ -164,27 +168,43 @@ class GameEnvironment(gym.Env):
 
         return state
 
+    def _find_piece_type_at(self, player, sq):
+        """通过遍历bitboards找到指定位置的棋子类型。"""
+        sq_bb = ULL(sq)
+        for pt_val in range(self.NUM_PIECE_TYPES):
+            if self.piece_bitboards[player][pt_val] & sq_bb:
+                return PieceType(pt_val)
+        return None
+
     def step(self, action_index):
         """执行一个动作，更新游戏状态。"""
-        # --- 1. 解码并执行动作 ---
-        # 假定输入的action_index始终有效，移除合法性检查以优化性能
+        raw_reward = 0
         if 0 <= action_index < self.REVEAL_ACTIONS_COUNT:
-            # 这是一个翻棋动作
             from_sq = action_index
             move = Move(from_sq=from_sq, to_sq=from_sq, action_type=ACTION_TYPE_REVEAL)
             self._apply_reveal_update(move)
-            self.move_counter = 0 # 翻棋重置计数器
+            self.move_counter = 0
         
         elif self.REVEAL_ACTIONS_COUNT <= action_index < self.ACTION_SPACE_SIZE:
-            # 这是移动/攻击动作 (占位符)
-            pass
-        
-        # --- 2. 切换玩家 ---
+            move_action_idx = action_index - self.REVEAL_ACTIONS_COUNT
+            from_sq = move_action_idx // 4
+            direction_idx = move_action_idx % 4
+            to_sq = from_sq + [-4, 4, -1, 1][direction_idx]
+            
+            move = Move(from_sq=from_sq, to_sq=to_sq, action_type=ACTION_TYPE_MOVE)
+            
+            # 先判断是否是炮的移动
+            attacker_type = self._find_piece_type_at(self.current_player, from_sq)
+            if attacker_type == PieceType.B:
+                raw_reward = self._handle_cannon_move(move) # 占位符
+            else:
+                raw_reward = self._apply_move_action(move, attacker_type)
+
         self.current_player = -self.current_player
         
-        # --- 3. 准备返回值 (奖励和结束判断为占位符) ---
         observation = self.get_state()
-        reward = 0.0
+        # 备注: 此处的最终reward计算可以根据需要变得更复杂
+        reward = raw_reward / self.WINNING_SCORE if self.WINNING_SCORE > 0 else raw_reward
         terminated = False
         truncated = False
         info = {'action_mask': self.action_masks()}
@@ -196,40 +216,133 @@ class GameEnvironment(gym.Env):
         piece = self.board[sq]
         piece.revealed = True
         
-        # 更新Bitboards: 使用异或(XOR)操作来翻转比特位
-        # 1. 从 hidden_bitboard 中移除该位置
         self.hidden_bitboard ^= ULL(sq)
-        # 2. 在对应玩家的 revealed_bitboards 中添加该位置
         self.revealed_bitboards[piece.player] |= ULL(sq)
-        # 3. 在对应玩家的特定棋子类型 piece_bitboards 中添加该位置
         self.piece_bitboards[piece.player][piece.piece_type.value] |= ULL(sq)
 
-    def _apply_move_update(self, move: Move):
-        """增量更新：处理移动到空位的动作。(占位符)"""
-        pass
+    def _apply_move_action(self, move: Move, attacker_type: PieceType):
+        """
+        处理所有非炮棋子的移动和攻击，并返回原始奖励。
+        此函数不依赖self.board。
+        """
+        to_sq_bb = ULL(move.to_sq)
+        
+        # 优先检查是否移动到空位
+        if self.empty_bitboard & to_sq_bb:
+            # --- 移动到空位 ---
+            move_mask = ULL(move.from_sq) | to_sq_bb
+            self.piece_bitboards[self.current_player][attacker_type.value] ^= move_mask
+            self.revealed_bitboards[self.current_player] ^= move_mask
+            self.empty_bitboard ^= move_mask
+            
+            # 更新棋盘数组以保持同步（仅用于翻棋和炮的逻辑）
+            self.board[move.to_sq], self.board[move.from_sq] = self.board[move.from_sq], None
+            
+            self.move_counter += 1
+            return 0
+        else:
+            # --- 吃子 ---
+            opponent_player = -self.current_player
+            defender_type = self._find_piece_type_at(opponent_player, move.to_sq)
 
-    def _apply_attack_update(self, move: Move):
-        """增量更新：处理攻击动作。(占位符)"""
-        pass
+            # 更新攻击方
+            attacker_move_mask = ULL(move.from_sq) | to_sq_bb
+            self.piece_bitboards[self.current_player][attacker_type.value] ^= attacker_move_mask
+            self.revealed_bitboards[self.current_player] ^= attacker_move_mask
+            
+            # 移除被吃方
+            self.piece_bitboards[opponent_player][defender_type.value] ^= to_sq_bb
+            self.revealed_bitboards[opponent_player] ^= to_sq_bb
+            
+            # 更新空位
+            self.empty_bitboard |= ULL(move.from_sq)
+            
+            # 更新棋盘数组
+            defender_obj = self.board[move.to_sq]
+            self.dead_pieces[opponent_player].append(defender_obj)
+            self.board[move.to_sq], self.board[move.from_sq] = self.board[move.from_sq], None
+
+            self.move_counter = 0
+            
+            # 计算并返回与棋子价值挂钩的原始奖励
+            points = self.PIECE_VALUES[defender_type]
+            self.scores[self.current_player] += points
+            return float(points)
+
+    def _handle_cannon_move(self, move: Move):
+        """处理炮的移动/攻击。(占位符)"""
+        # 备注: 炮的逻辑将在后续实现
+        return 0
+
+    def _generate_cannon_action_masks(self, actions):
+        """生成炮的所有合法动作。(占位符)"""
+        # 备注: 炮的逻辑将在后续实现
+        return actions
 
     def action_masks(self):
         """生成当前玩家所有合法动作的掩码。"""
         actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=int)
+        my_player = self.current_player
+        opponent_player = -my_player
         
-        # 1. 生成翻棋动作 (Reveal)
-        # 任何未翻开的棋子都可以被当前玩家翻开
         hidden_bb = self.hidden_bitboard
         temp_bb = hidden_bb
         while temp_bb > 0:
-            # `bit_length() - 1` 是一个快速找到最高位(Most Significant Bit, MSB)索引的方法
             sq = temp_bb.bit_length() - 1
             actions[sq] = 1
-            # 使用XOR将该位清零，以便处理下一个未翻开的棋子
             temp_bb ^= ULL(sq)
 
-        # 2. 生成移动和攻击动作 (Move & Attack) (占位符)
-        # 备注: 这部分逻辑将在后续重构中实现
-        # actions[self.REVEAL_ACTIONS_COUNT:] = ...
+        my_revealed_bb = self.revealed_bitboards[my_player]
+        
+        target_bbs = {}
+        cumulative_targets = self.empty_bitboard
+        for pt_val in range(self.NUM_PIECE_TYPES):
+            cumulative_targets |= self.piece_bitboards[opponent_player][pt_val]
+            target_bbs[pt_val] = cumulative_targets
+        
+        target_bbs[PieceType.A.value] |= self.piece_bitboards[opponent_player][PieceType.G.value] # 兵吃将
+        target_bbs[PieceType.G.value] &= ~self.piece_bitboards[opponent_player][PieceType.A.value] # 将不吃兵
+
+        for pt_val in range(self.NUM_PIECE_TYPES):
+            if pt_val == PieceType.B.value: continue 
+
+            my_pieces_bb = self.piece_bitboards[my_player][pt_val]
+            valid_targets = target_bbs[pt_val]
+
+            # 向上
+            potential_to_sq = (my_pieces_bb >> 4) & valid_targets
+            from_sq_bb = (potential_to_sq << 4) & my_revealed_bb
+            temp_from_bb = from_sq_bb
+            while temp_from_bb > 0:
+                sq = temp_from_bb.bit_length() - 1
+                actions[self.REVEAL_ACTIONS_COUNT + sq * 4 + 0] = 1
+                temp_from_bb ^= ULL(sq)
+            # 向下
+            potential_to_sq = (my_pieces_bb << 4) & valid_targets
+            from_sq_bb = (potential_to_sq >> 4) & my_revealed_bb
+            temp_from_bb = from_sq_bb
+            while temp_from_bb > 0:
+                sq = temp_from_bb.bit_length() - 1
+                actions[self.REVEAL_ACTIONS_COUNT + sq * 4 + 1] = 1
+                temp_from_bb ^= ULL(sq)
+            # 向左
+            potential_to_sq = ((my_pieces_bb & NOT_FILE_A) >> 1) & valid_targets
+            from_sq_bb = (potential_to_sq << 1) & my_revealed_bb
+            temp_from_bb = from_sq_bb
+            while temp_from_bb > 0:
+                sq = temp_from_bb.bit_length() - 1
+                actions[self.REVEAL_ACTIONS_COUNT + sq * 4 + 2] = 1
+                temp_from_bb ^= ULL(sq)
+            # 向右
+            potential_to_sq = ((my_pieces_bb & NOT_FILE_D) << 1) & valid_targets
+            from_sq_bb = (potential_to_sq >> 1) & my_revealed_bb
+            temp_from_bb = from_sq_bb
+            while temp_from_bb > 0:
+                sq = temp_from_bb.bit_length() - 1
+                actions[self.REVEAL_ACTIONS_COUNT + sq * 4 + 3] = 1
+                temp_from_bb ^= ULL(sq)
+
+        actions = self._generate_cannon_action_masks(actions)
         
         return actions
 
