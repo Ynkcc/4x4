@@ -9,8 +9,8 @@ from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtCore import Qt, QSize
 import numpy as np
 
-# 导入您提供的游戏环境
-from Game import GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ, ACTION_TYPE_REVEAL
+# 导入您的游戏环境
+from Game import GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ
 
 class BitboardGridWidget(QWidget):
     """一个专门用于可视化单个bitboard的4x4网格小部件。"""
@@ -233,50 +233,76 @@ class MainWindow(QMainWindow):
             PieceType.CHARIOT: "車", PieceType.HORSE: "馬", PieceType.CANNON: "炮", PieceType.SOLDIER: "卒"
         }
 
-        # 预先计算所有合法目标位置
-        valid_targets = set()
+        # ==================== 新的、更智能的高亮逻辑 ====================
+        # 1. 预先计算所有不同类型的合法目标位置
+        reveal_targets = set()
+        normal_move_targets = set()
+        cannon_attack_targets = set()
+        
+        # A. 如果已选择棋子，计算移动和攻击目标
         if self.selected_from_sq is not None:
             from_pos = SQ_TO_POS[self.selected_from_sq]
-            for action_id, is_valid in enumerate(self.valid_action_mask):
-                if is_valid:
-                    coords = self.game.action_to_coords.get(action_id)
-                    if isinstance(coords, tuple) and len(coords) == 2 and isinstance(coords[0], tuple):
-                        if coords[0] == from_pos:
-                             valid_targets.add(coords[1])
-        
+            selected_piece = self.game.board[self.selected_from_sq]
+            is_cannon = selected_piece.piece_type == PieceType.CANNON
+            
+            # 遍历所有可能的动作，分类放入不同的集合
+            for action_index, is_valid in enumerate(self.valid_action_mask):
+                if not is_valid:
+                    continue
+                coords = self.game.action_to_coords.get(action_index)
+                if coords is None or not isinstance(coords, tuple) or len(coords) != 2 or not isinstance(coords[0], tuple):
+                    continue
+                
+                # 检查是否是当前选中棋子的动作
+                if coords[0] == from_pos:
+                    target_pos = coords[1]
+                    # 如果是炮，并且是攻击动作
+                    if is_cannon and action_index >= (self.game.REVEAL_ACTIONS_COUNT + self.game.REGULAR_MOVE_ACTIONS_COUNT):
+                        cannon_attack_targets.add(target_pos)
+                    # 否则是普通移动
+                    else:
+                        normal_move_targets.add(target_pos)
+
+        # B. 如果未选择棋子，计算翻子目标
+        else:
+            for action_index in range(self.game.REVEAL_ACTIONS_COUNT):
+                if self.valid_action_mask[action_index]:
+                    pos = self.game.action_to_coords.get(action_index)
+                    if pos:
+                        reveal_targets.add(pos)
+
+        # 2. 遍历棋盘按钮，应用分级样式
         for r in range(4):
             for c in range(4):
-                sq = POS_TO_SQ[r, c]
+                sq = POS_TO_SQ[(r, c)]
+                pos = (r, c)
                 button = self.board_buttons[r][c]
                 piece = self.game.board[sq]
                 
-                # --- 设置样式 ---
+                # --- 设置样式 (顺序很重要：特殊覆盖一般) ---
                 stylesheet = "QPushButton { border: 2px solid #AAAAAA; }"
                 
-                # 高亮合法动作
-                is_valid_action = False
-                # 检查翻棋
-                action_idx_reveal = self.game.coords_to_action.get((r,c))
-                if action_idx_reveal is not None and self.valid_action_mask[action_idx_reveal]:
-                    is_valid_action = True
+                # 优先应用最特殊的样式：炮的攻击目标
+                if pos in cannon_attack_targets:
+                    stylesheet += "QPushButton { background-color: #FFC0CB; }" # 浅红色
+                # 其次应用一般合法动作的样式
+                elif pos in normal_move_targets or pos in reveal_targets:
+                    stylesheet += "QPushButton { background-color: #90EE90; }" # 浅绿色
                 
-                # 检查移动目标
-                if (r,c) in valid_targets:
-                    is_valid_action = True
-                
+                # 最后应用选中棋子的边框，这会覆盖之前的边框样式
                 if self.selected_from_sq == sq:
-                    stylesheet += "QPushButton { border-color: #0078D7; border-width: 4px; }" # 选中的棋子
-                elif is_valid_action:
-                    stylesheet += "QPushButton { background-color: #90EE90; }" # 合法目标
+                    stylesheet += "QPushButton { border-color: #0078D7; border-width: 4px; }"
                 
                 button.setStyleSheet(stylesheet)
+                # ==================== 高亮逻辑结束 ====================
 
                 # --- 设置文本和颜色 ---
                 if piece is None:
                     button.setText("")
                 elif not piece.revealed:
                     button.setText("暗")
-                    button.setForegroundRole(QPalette.ColorRole.ButtonText)
+                    # 重置文字颜色为默认，防止受旧样式影响
+                    button.setStyleSheet(button.styleSheet() + "QPushButton { color: black; }")
                 elif piece.player == 1:
                     button.setText(red_map[piece.piece_type])
                     button.setStyleSheet(button.styleSheet() + "QPushButton { color: red; }")
