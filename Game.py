@@ -1,4 +1,4 @@
-# Game.py (Bitboard Version - Final Architecture)
+# Game.py (Bitboard Version - Final Architecture with Clear Names)
 
 import random
 from enum import Enum
@@ -32,7 +32,13 @@ Move = collections.namedtuple('Move', ['from_sq', 'to_sq', 'action_type'])
 
 class PieceType(Enum):
     """定义棋子类型及其大小等级。值越大，等级越高。"""
-    A = 0; B = 1; C = 2; D = 3; E = 4; F = 5; G = 6 # 兵/卒, 炮, 马, 车, 象, 士, 将
+    SOLDIER = 0   # 兵/卒
+    CANNON = 1    # 炮
+    HORSE = 2     # 马
+    CHARIOT = 3   # 车
+    ELEPHANT = 4  # 象
+    ADVISOR = 5   # 士
+    GENERAL = 6   # 将
 
 class Piece:
     """棋子对象，存储棋子本身的属性（类型，玩家，是否翻开）。"""
@@ -84,7 +90,7 @@ class GameEnvironment(gym.Env):
         self.dead_pieces = {-1: [], 1: []}; self.current_player = 1
         self.move_counter = 0; self.scores = {-1: 0, 1: 0}
 
-        # 核心查找表
+        # 核心查找表与缓存
         self.attack_tables = {}
         self.action_to_move_map = {} # 反向查找表: action_index -> Move
         self.move_to_action_map = {} # 正向查找表: (from, to) -> action_index
@@ -104,7 +110,6 @@ class GameEnvironment(gym.Env):
         self.attack_tables['rays'] = ray_attacks
         
         # 2. 构建稠密、按方向组织的普通移动查找表
-        # action_index -> Move and (from,to) -> action_index
         action_idx = self.REVEAL_ACTIONS_COUNT # 从16开始
         
         # 方向顺序: UP, DOWN, LEFT, RIGHT
@@ -120,7 +125,6 @@ class GameEnvironment(gym.Env):
             for c in range(3): from_sq = r * 4 + c; self.action_to_move_map[action_idx] = Move(from_sq, from_sq + 1, ACTION_TYPE_MOVE); self.move_to_action_map[(from_sq, from_sq + 1)] = action_idx; action_idx += 1
 
         # 3. 构建稠密的炮攻击查找表
-        # (from_sq, direction_idx) -> action_index
         base_idx = self.REVEAL_ACTIONS_COUNT + self.UP_ACTIONS_COUNT + self.DOWN_ACTIONS_COUNT + self.LEFT_ACTIONS_COUNT + self.RIGHT_ACTIONS_COUNT
         for from_sq in range(self.TOTAL_POSITIONS):
             for direction_idx in range(4):
@@ -163,10 +167,9 @@ class GameEnvironment(gym.Env):
 
     def step(self, action_index):
         raw_reward = 0
-        # 翻棋动作直接用action_index作为sq
         if 0 <= action_index < self.REVEAL_ACTIONS_COUNT:
             move = Move(action_index, action_index, ACTION_TYPE_REVEAL)
-        else: # 其他移动/攻击动作，通过反向查找表获取move对象
+        else: 
             move = self.action_to_move_map.get(action_index)
         
         if move is None: raise ValueError(f"Invalid action_index: {action_index}")
@@ -222,6 +225,12 @@ class GameEnvironment(gym.Env):
         return float(points) if defender.player != attacker.player else -float(points)
 
     def action_masks(self):
+        # 在每个回合开始时，清空上一回合的炮的攻击缓存
+        # 普通移动是固定的，不需要清空
+        cannon_move_keys = [k for k, v in self.action_to_move_map.items() if v.action_type == ACTION_TYPE_CANNON_ATTACK]
+        for key in cannon_move_keys:
+            del self.action_to_move_map[key]
+
         action_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=int)
         my_player, opponent_player = self.current_player, -self.current_player
         
@@ -231,16 +240,17 @@ class GameEnvironment(gym.Env):
         # 2. 普通棋子移动/攻击 (16-63)
         my_revealed_bb = self.revealed_bitboards[my_player]; target_bbs = {}
         cumulative_targets = self.empty_bitboard
-        for pt_val in range(self.NUM_PIECE_TYPES):
-            cumulative_targets |= self.piece_bitboards[opponent_player][pt_val]; target_bbs[pt_val] = cumulative_targets
-        target_bbs[PieceType.A.value] |= self.piece_bitboards[opponent_player][PieceType.G.value]
-        target_bbs[PieceType.G.value] &= ~self.piece_bitboards[opponent_player][PieceType.A.value]
+        for pt in PieceType:
+            cumulative_targets |= self.piece_bitboards[opponent_player][pt.value]
+            target_bbs[pt] = cumulative_targets
+        target_bbs[PieceType.SOLDIER] |= self.piece_bitboards[opponent_player][PieceType.GENERAL.value]
+        target_bbs[PieceType.GENERAL] &= ~self.piece_bitboards[opponent_player][PieceType.SOLDIER.value]
 
         # -- 按方向，并行计算所有普通棋子的走法 --
         up_moves_bb, down_moves_bb, left_moves_bb, right_moves_bb = 0, 0, 0, 0
-        for pt_val in range(self.NUM_PIECE_TYPES):
-            if pt_val == PieceType.B.value: continue 
-            my_pieces_bb = self.piece_bitboards[my_player][pt_val]; valid_targets = target_bbs[pt_val]
+        for pt in PieceType:
+            if pt == PieceType.CANNON: continue 
+            my_pieces_bb = self.piece_bitboards[my_player][pt.value]; valid_targets = target_bbs[pt]
             up_moves_bb |= ((my_pieces_bb) >> 4) & valid_targets
             down_moves_bb |= ((my_pieces_bb) << 4) & valid_targets
             left_moves_bb |= ((my_pieces_bb & NOT_FILE_A) >> 1) & valid_targets
@@ -256,7 +266,7 @@ class GameEnvironment(gym.Env):
                 temp_to_bb ^= ULL(to_sq)
 
         # 3. 炮的攻击 (64-127)
-        my_cannons_bb = self.piece_bitboards[my_player][PieceType.B.value]; all_pieces_bb = ~self.empty_bitboard
+        my_cannons_bb = self.piece_bitboards[my_player][PieceType.CANNON.value]; all_pieces_bb = ~self.empty_bitboard
         valid_cannon_targets = ~self.revealed_bitboards[my_player]
         temp_cannons_bb = my_cannons_bb
         while temp_cannons_bb > 0:
@@ -270,7 +280,6 @@ class GameEnvironment(gym.Env):
                 target_sq = targets.bit_length() - 1 if direction_idx in [0, 2] else (targets & -targets).bit_length() - 1
                 if ULL(target_sq) & valid_cannon_targets:
                     action_index = self.cannon_attack_to_action_map[(from_sq, direction_idx)]
-                    # 炮的攻击需要保存(from,to)到反向查找表，以便step查询
                     self.action_to_move_map[action_index] = Move(from_sq, target_sq, ACTION_TYPE_CANNON_ATTACK)
                     action_mask[action_index] = 1
             temp_cannons_bb ^= ULL(from_sq)
