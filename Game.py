@@ -1,4 +1,4 @@
-# Game.py (Bitboard Version - Final Unified Lookup Table Architecture)
+# Game.py (Bitboard Version - Final with Render)
 
 import random
 from enum import Enum
@@ -128,10 +128,8 @@ class GameEnvironment(gym.Env):
         for r1 in range(self.BOARD_ROWS):
             for c1 in range(self.BOARD_COLS):
                 from_pos = (r1, c1)
-                # 水平方向
                 for c2 in range(c1 + 2, self.BOARD_COLS): self.action_to_coords[action_idx] = (from_pos, (r1, c2)); self.coords_to_action[(from_pos, (r1, c2))] = action_idx; action_idx += 1
                 for c2 in range(c1 - 2, -1, -1): self.action_to_coords[action_idx] = (from_pos, (r1, c2)); self.coords_to_action[(from_pos, (r1, c2))] = action_idx; action_idx += 1
-                # 垂直方向
                 for r2 in range(r1 + 2, self.BOARD_ROWS): self.action_to_coords[action_idx] = (from_pos, (r2, c1)); self.coords_to_action[(from_pos, (r2, c1))] = action_idx; action_idx += 1
                 for r2 in range(r1 - 2, -1, -1): self.action_to_coords[action_idx] = (from_pos, (r2, c1)); self.coords_to_action[(from_pos, (r2, c1))] = action_idx; action_idx += 1
 
@@ -176,13 +174,12 @@ class GameEnvironment(gym.Env):
         coords = self.action_to_coords.get(action_index)
         if coords is None: raise ValueError(f"Invalid action_index: {action_index}")
 
-        # 根据坐标结构判断动作类型
-        if isinstance(coords[0], int): # 翻棋: coords = (r, c)
+        if isinstance(coords[0], int):
             from_sq = POS_TO_SQ[coords]
             move = Move(from_sq, from_sq, ACTION_TYPE_REVEAL)
             self._apply_reveal_update(move)
             self.move_counter = 0
-        else: # 移动或攻击: coords = ((r1, c1), (r2, c2))
+        else:
             from_sq, to_sq = POS_TO_SQ[coords[0]], POS_TO_SQ[coords[1]]
             attacker = self.board[from_sq]
             if attacker.piece_type == PieceType.CANNON:
@@ -294,5 +291,46 @@ class GameEnvironment(gym.Env):
             
         return action_mask
 
-    def render(self): pass
-    def close(self): pass
+    def render(self):
+        """以人类可读的方式在终端打印当前棋盘状态。"""
+        if self.render_mode != 'human': return
+
+        # 定义棋子在终端的显示字符
+        red_map = {
+            PieceType.GENERAL: "帥", PieceType.ADVISOR: "仕", PieceType.ELEPHANT: "相",
+            PieceType.CHARIOT: "俥", PieceType.HORSE: "傌", PieceType.CANNON: "炮", PieceType.SOLDIER: "兵"
+        }
+        black_map = {
+            PieceType.GENERAL: "將", PieceType.ADVISOR: "士", PieceType.ELEPHANT: "象",
+            PieceType.CHARIOT: "車", PieceType.HORSE: "馬", PieceType.CANNON: "炮", PieceType.SOLDIER: "卒"
+        }
+        
+        # 打印棋盘
+        print("  " + "-" * 21)
+        for r in range(self.BOARD_ROWS):
+            print(f"{r} |", end="")
+            for c in range(self.BOARD_COLS):
+                sq = POS_TO_SQ[r, c]
+                # 优先使用bitboard判断状态，效率更高
+                if self.empty_bitboard & ULL(sq):
+                    print("    |", end="") # 空位
+                else:
+                    piece = self.board[sq]
+                    if not piece.revealed:
+                        print(f" \033[90m暗\033[0m  |", end="") # 未翻开 (灰色)
+                    elif piece.player == 1:
+                        print(f" \033[91m{red_map[piece.piece_type]}\033[0m  |", end="") # 红方棋子 (红色)
+                    else: # player == -1
+                        print(f" \033[94m{black_map[piece.piece_type]}\033[0m  |", end="") # 黑方棋子 (蓝色)
+            print()
+            print("  " + "-" * 21)
+        print("    " + "   ".join(str(c) for c in range(self.BOARD_COLS)))
+
+        # 打印游戏状态信息
+        player_str = "\033[91m红方\033[0m" if self.current_player == 1 else "\033[94m黑方\033[0m"
+        print(f"\n当前玩家: {player_str}, 得分: (红) {self.scores[1]} - {self.scores[-1]} (黑), "
+              f"连续未吃/翻子: {self.move_counter}/{self.MAX_CONSECUTIVE_MOVES}\n")
+
+    def close(self):
+        """清理环境资源，符合Gym接口。"""
+        pass
