@@ -11,7 +11,8 @@ from gymnasium import spaces
 # --- Bitboard 核心工具 ---
 # ==============================================================================
 
-POS_TO_SQ = np.array([[(r * 4 + c) for c in range(4)] for r in range(4)], dtype=np.int32)
+
+POS_TO_SQ = {(r, c): r * 4 + c for r in range(4) for c in range(4)}
 SQ_TO_POS = {sq: (sq // 4, sq % 4) for sq in range(16)}
 
 def ULL(x):
@@ -75,6 +76,13 @@ class GameEnvironment(gym.Env):
         hidden_pieces_plane_size = self.TOTAL_POSITIONS; empty_plane_size = self.TOTAL_POSITIONS
         scalar_features_size = 3
         self.state_size = ( my_pieces_plane_size + opponent_pieces_plane_size + hidden_pieces_plane_size + empty_plane_size + scalar_features_size )
+
+        # 定义状态向量中各个部分的起始索引
+        self._my_pieces_plane_start_idx = 0
+        self._opponent_pieces_plane_start_idx = my_pieces_plane_size
+        self._hidden_pieces_plane_start_idx = my_pieces_plane_size + opponent_pieces_plane_size
+        self._empty_plane_start_idx = my_pieces_plane_size + opponent_pieces_plane_size + hidden_pieces_plane_size
+        self._scalar_features_start_idx = my_pieces_plane_size + opponent_pieces_plane_size + hidden_pieces_plane_size + empty_plane_size
 
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(self.state_size,), dtype=np.float32)
         self.action_space = spaces.Discrete(self.ACTION_SPACE_SIZE)
@@ -228,8 +236,11 @@ class GameEnvironment(gym.Env):
         self.piece_bitboards[attacker.player][attacker.piece_type.value] ^= attacker_move_mask
         self.revealed_bitboards[attacker.player] ^= attacker_move_mask
         defender_remove_mask = ULL(move.to_sq)
-        if defender.revealed: self.piece_bitboards[defender.player][defender.piece_type.value] ^= defender_remove_mask
-        else: self.hidden_bitboard ^= defender_remove_mask
+        if defender.revealed:
+             self.piece_bitboards[defender.player][defender.piece_type.value] ^= defender_remove_mask
+             self.revealed_bitboards[defender.player] ^= defender_remove_mask
+        else: 
+            self.hidden_bitboard ^= defender_remove_mask
         self.empty_bitboard |= ULL(move.from_sq); self.dead_pieces[defender.player].append(defender)
         self.board[move.to_sq], self.board[move.from_sq] = attacker, None
         self.move_counter = 0
