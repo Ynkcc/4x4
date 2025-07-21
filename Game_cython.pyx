@@ -132,11 +132,11 @@ cdef class GameEnvironment:
     cdef public int ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT, MAX_CONSECUTIVE_MOVES
     
     # 状态向量索引
-    cdef int _my_pieces_plane_start_idx
-    cdef int _opponent_pieces_plane_start_idx
-    cdef int _hidden_pieces_plane_start_idx
-    cdef int _empty_plane_start_idx
-    cdef int _scalar_features_start_idx
+    cdef public int _my_pieces_plane_start_idx
+    cdef public int _opponent_pieces_plane_start_idx
+    cdef public int _hidden_pieces_plane_start_idx
+    cdef public int _empty_plane_start_idx
+    cdef public int _scalar_features_start_idx
     
     # --- Gymnasium 环境元数据 ---
     # metadata = {'render_modes': ['human'], 'render_fps': 4}  # 注释掉，因为cdef class不支持类变量
@@ -225,14 +225,14 @@ cdef class GameEnvironment:
     @cython.cfunc
     cdef void _initialize_board(self):
         """初始化棋盘和所有状态变量 (C函数)。"""
-        # 创建棋子列表
+        # 创建棋子列表 - 与Bitboard版本保持一致的顺序
         pieces = []
-        cdef int pt_val, p, _, count
-        for pt_val in range(NUM_PIECE_TYPES):
-            count = PIECE_MAX_COUNTS[pt_val]
+        # 按照PieceType枚举的顺序创建棋子
+        for pt in PieceType:
+            count = PIECE_MAX_COUNTS[pt.value]
             for p in [1, -1]:
                 for _ in range(count):
-                    pieces.append(Piece(PieceType(pt_val), p))
+                    pieces.append(Piece(pt, p))
 
         if self.np_random is not None:
             self.np_random.shuffle(pieces)
@@ -258,9 +258,10 @@ cdef class GameEnvironment:
 
     # 这是 Gym API 的一部分，必须是cpdef或def
     def reset(self, seed=None, options=None):
-        # 由于是cdef class，需要手动设置seed
+        # 使用与Gymnasium相同的随机数生成器设置方式
         if seed is not None:
-            self.np_random = np.random.RandomState(seed)
+            # 使用numpy的新式Generator，与Gymnasium保持一致
+            self.np_random = np.random.default_rng(seed)
         self._initialize_board()
         return self.get_state(), {'action_mask': self.action_masks()}
     
@@ -269,8 +270,10 @@ cdef class GameEnvironment:
     def get_state(self):
         # 使用np.float32_t类型来匹配numpy数组
         cdef np.ndarray[np.float32_t, ndim=1] state = np.zeros(self.observation_space.shape[0], dtype=np.float32)
-        cdef int my_player_idx = 1 if self.current_player == 1 else 0
-        cdef int opponent_player_idx = 1 - my_player_idx
+        cdef int my_player = self.current_player
+        cdef int opponent_player = -self.current_player
+        cdef int my_player_idx = 1 if my_player == 1 else 0
+        cdef int opponent_player_idx = 1 if opponent_player == 1 else 0
         
         cdef int pt_val, start_idx
         cdef bitboard bb
@@ -294,8 +297,8 @@ cdef class GameEnvironment:
         cdef double move_norm = MAX_CONSECUTIVE_MOVES if MAX_CONSECUTIVE_MOVES > 0 else 1.0
         cdef int scalar_idx = self._scalar_features_start_idx
         
-        state[scalar_idx] = self.scores[self.current_player] / score_norm
-        state[scalar_idx + 1] = self.scores[-self.current_player] / score_norm
+        state[scalar_idx] = self.scores[my_player] / score_norm
+        state[scalar_idx + 1] = self.scores[opponent_player] / score_norm
         state[scalar_idx + 2] = self.move_counter / move_norm
         
         return state
@@ -453,7 +456,7 @@ cdef class GameEnvironment:
                 action_mask[self.coords_to_action[SQ_TO_POS[sq]]] = 1
             
         # 2. 普通棋子移动/攻击
-        for pt_val in range(NUM_PIECE_TYPES-1, -1, -1):
+        for pt_val in range(NUM_PIECE_TYPES):  # 0到6，与Bitboard版本保持一致
             cumulative_targets |= self.piece_bitboards[opponent_player_idx][pt_val]
             target_bbs[pt_val] = cumulative_targets
         target_bbs[0] |= self.piece_bitboards[opponent_player_idx][6]  # SOLDIER gets GENERAL
