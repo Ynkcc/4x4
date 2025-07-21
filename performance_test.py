@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""
+性能测试脚本 - 测试暗棋游戏环境的性能
+使用固定随机种子完成1000局游戏，并统计各项性能指标
+支持对比新旧版本的性能差异
+新增 'profile' 模式，用于深度性能剖析
+"""
+
+import time
+import numpy as np
+import random
+import statistics
+from collections import defaultdict
+import sys
+import os
+import cProfile
+import pstats
+from io import StringIO
+
+# 导入新版本游戏环境
+from Game import GameEnvironment as NewGameEnvironment
+
+# 导入旧版本游戏环境
+try:
+    from Game_oldversion import GameEnvironment as OldGameEnvironment
+    OLD_VERSION_AVAILABLE = True
+except ImportError:
+    print("警告: 无法导入 Game_oldversion.py，将只测试新版本")
+    OLD_VERSION_AVAILABLE = False
+
+
+class PerformanceTester:
+    """游戏环境性能测试器"""
+    
+    def __init__(self, random_seed=42):
+        """
+        初始化性能测试器
+        
+        Args:
+            random_seed: 固定的随机种子，确保测试结果可重现
+        """
+        self.random_seed = random_seed
+        self.reset_random_seeds()
+        
+    def reset_random_seeds(self):
+        """重置所有随机种子"""
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+    
+    def run_single_game(self, env, max_steps=1000):
+        """
+        运行单局游戏并收集统计信息
+        
+        Args:
+            env: 游戏环境
+            max_steps: 最大步数限制
+            
+        Returns:
+            dict: 包含游戏统计信息的字典
+        """
+        obs, info = env.reset()
+        total_steps = 0
+        total_reward = 0
+        reveal_actions = 0
+        move_actions = 0
+        cannon_actions = 0
+        
+        action_times = []
+        step_times = []
+        
+        # 获取动作空间大小（适应新旧版本）
+        action_space_size = env.action_space.n
+        
+        for step in range(max_steps):
+            # 测量动作选择时间
+            action_start = time.perf_counter()
+            
+            # 获取有效动作并随机选择
+            action_mask = info.get('action_mask', np.ones(action_space_size))
+            valid_actions = np.where(action_mask)[0]
+            
+            if len(valid_actions) == 0:
+                break
+                
+            action = np.random.choice(valid_actions)
+            action_time = time.perf_counter() - action_start
+            action_times.append(action_time)
+            
+            # 统计动作类型（根据版本调整）
+            if hasattr(env, 'ACTION_SPACE_SIZE') and env.ACTION_SPACE_SIZE == 112:
+                # 新版本 (bitboard)
+                if action < 16:  # 翻棋动作
+                    reveal_actions += 1
+                elif action < 64:  # 普通移动
+                    move_actions += 1
+                else:  # 炮击动作
+                    cannon_actions += 1
+            else:
+                # 旧版本 (每个位置5个动作: 上,下,左,右,翻)
+                action_type = action % 5
+                if action_type == 4:  # 翻棋
+                    reveal_actions += 1
+                elif action_type in [0, 1, 2, 3]:  # 移动/攻击
+                    move_actions += 1
+                # 旧版本没有专门的炮击动作类型统计
+            
+            # 测量环境步进时间
+            step_start = time.perf_counter()
+            obs, reward, terminated, truncated, info = env.step(action)
+            step_time = time.perf_counter() - step_start
+            step_times.append(step_time)
+            
+            total_reward += reward
+            total_steps += 1
+            
+            if terminated or truncated:
+                break
+        
+        return {
+            'steps': total_steps,
+            'total_reward': total_reward,
+            'reveal_actions': reveal_actions,
+            'move_actions': move_actions,
+            'cannon_actions': cannon_actions,
+            'avg_action_time': np.mean(action_times) if action_times else 0,
+            'avg_step_time': np.mean(step_times) if step_times else 0,
+            'max_step_time': np.max(step_times) if step_times else 0,
+            'min_step_time': np.min(step_times) if step_times else 0
+        }
+    
+    def run_performance_test(self, num_games=1000, max_steps_per_game=1000, version='new'):
+        """
+        运行完整的性能测试
+        
+        Args:
+            num_games: 要运行的游戏局数
+            max_steps_per_game: 每局游戏的最大步数
+            version: 'new' 或 'old' 或 'both' 选择测试版本
+            
+        Returns:
+            dict: 性能测试结果统计
+        """
+        if version == 'both':
+            return self.run_comparison_test(num_games, max_steps_per_game)
+        
+        print(f"开始性能测试 - {num_games}局游戏 ({'新版本' if version == 'new' else '旧版本'})")
+        print(f"使用随机种子: {self.random_seed}")
+        print("=" * 50)
+        
+        # 重置随机种子确保一致性
+        self.reset_random_seeds()
+        
+        # 选择环境版本
+        if version == 'new':
+            env = NewGameEnvironment()
+        elif version == 'old' and OLD_VERSION_AVAILABLE:
+            env = OldGameEnvironment()
+        else:
+            raise ValueError(f"不支持的版本: {version} 或旧版本不可用")
+        
+        env.reset(seed=self.random_seed)
+        
+        # 统计变量
+        game_stats = []
+        total_start_time = time.perf_counter()
+        
+        # 运行所有游戏
+        for game_idx in range(num_games):
+            if (game_idx + 1) % 100 == 0:
+                print(f"已完成 {game_idx + 1}/{num_games} 局游戏...")
+            
+            game_start = time.perf_counter()
+            stats = self.run_single_game(env, max_steps_per_game)
+            game_time = time.perf_counter() - game_start
+            stats['game_time'] = game_time
+            stats['game_index'] = game_idx + 1
+            
+            game_stats.append(stats)
+        
+        total_time = time.perf_counter() - total_start_time
+        
+        # 计算汇总统计
+        summary_stats = self._calculate_summary_stats(game_stats, total_time)
+        summary_stats['version'] = version
+        
+        # 输出结果
+        self._print_results(summary_stats, game_stats)
+        
+        return {
+            'summary': summary_stats,
+            'detailed_stats': game_stats
+        }
+    
+    def run_comparison_test(self, num_games=1000, max_steps_per_game=1000):
+        """
+        运行新旧版本对比测试
+        
+        Args:
+            num_games: 要运行的游戏局数
+            max_steps_per_game: 每局游戏的最大步数
+            
+        Returns:
+            dict: 包含新旧版本对比的测试结果
+        """
+        if not OLD_VERSION_AVAILABLE:
+            print("错误: 旧版本不可用，无法进行对比测试")
+            return None
+        
+        print(f"开始新旧版本对比测试 - 每个版本{num_games}局游戏")
+        print(f"使用随机种子: {self.random_seed}")
+        print("=" * 60)
+        
+        # 测试新版本
+        print("\n正在测试新版本...")
+        new_results = self.run_performance_test(num_games, max_steps_per_game, 'new')
+        
+        print("\n" + "=" * 60)
+        
+        # 测试旧版本
+        print("\n正在测试旧版本...")
+        old_results = self.run_performance_test(num_games, max_steps_per_game, 'old')
+        
+        # 生成对比报告
+        print("\n" + "=" * 60)
+        self._print_comparison_report(new_results['summary'], old_results['summary'])
+        
+        return {
+            'new_version': new_results,
+            'old_version': old_results,
+            'comparison': self._calculate_comparison_metrics(
+                new_results['summary'], old_results['summary']
+            )
+        }
+    
+    def _calculate_summary_stats(self, game_stats, total_time):
+        """计算汇总统计信息"""
+        if not game_stats:
+            return {}
+        
+        # 提取各项指标
+        steps = [g['steps'] for g in game_stats]
+        game_times = [g['game_time'] for g in game_stats]
+        rewards = [g['total_reward'] for g in game_stats]
+        reveal_actions = [g['reveal_actions'] for g in game_stats]
+        move_actions = [g['move_actions'] for g in game_stats]
+        cannon_actions = [g['cannon_actions'] for g in game_stats]
+        avg_action_times = [g['avg_action_time'] for g in game_stats]
+        avg_step_times = [g['avg_step_time'] for g in game_stats]
+        
+        return {
+            'total_games': len(game_stats),
+            'total_time': total_time,
+            'avg_time_per_game': total_time / len(game_stats),
+            'games_per_second': len(game_stats) / total_time,
+            
+            # 步数统计
+            'avg_steps_per_game': statistics.mean(steps),
+            'median_steps_per_game': statistics.median(steps),
+            'min_steps_per_game': min(steps),
+            'max_steps_per_game': max(steps),
+            'std_steps_per_game': statistics.stdev(steps) if len(steps) > 1 else 0,
+            
+            # 时间统计
+            'avg_game_time': statistics.mean(game_times),
+            'median_game_time': statistics.median(game_times),
+            'min_game_time': min(game_times),
+            'max_game_time': max(game_times),
+            
+            # 奖励统计
+            'avg_total_reward': statistics.mean(rewards),
+            'median_total_reward': statistics.median(rewards),
+            'min_total_reward': min(rewards),
+            'max_total_reward': max(rewards),
+            
+            # 动作类型统计
+            'avg_reveal_actions': statistics.mean(reveal_actions),
+            'avg_move_actions': statistics.mean(move_actions),
+            'avg_cannon_actions': statistics.mean(cannon_actions),
+            
+            # 性能统计
+            'avg_action_selection_time': statistics.mean(avg_action_times),
+            'avg_env_step_time': statistics.mean(avg_step_times),
+            'total_steps': sum(steps),
+            'steps_per_second': sum(steps) / total_time
+        }
+    
+    def _print_results(self, summary_stats, game_stats):
+        """打印测试结果"""
+        print("\n" + "=" * 50)
+        print("性能测试结果")
+        print("=" * 50)
+        
+        print(f"总游戏局数: {summary_stats['total_games']}")
+        print(f"总测试时间: {summary_stats['total_time']:.2f} 秒")
+        print(f"平均每局游戏时间: {summary_stats['avg_time_per_game']:.4f} 秒")
+        print(f"游戏执行速度: {summary_stats['games_per_second']:.2f} 局/秒")
+        
+        print("\n--- 游戏步数统计 ---")
+        print(f"平均步数: {summary_stats['avg_steps_per_game']:.2f}")
+        print(f"中位数步数: {summary_stats['median_steps_per_game']:.2f}")
+        print(f"最少步数: {summary_stats['min_steps_per_game']}")
+        print(f"最多步数: {summary_stats['max_steps_per_game']}")
+        print(f"步数标准差: {summary_stats['std_steps_per_game']:.2f}")
+        
+        print("\n--- 游戏时间统计 ---")
+        print(f"平均游戏时间: {summary_stats['avg_game_time']:.4f} 秒")
+        print(f"中位数游戏时间: {summary_stats['median_game_time']:.4f} 秒")
+        print(f"最短游戏时间: {summary_stats['min_game_time']:.4f} 秒")
+        print(f"最长游戏时间: {summary_stats['max_game_time']:.4f} 秒")
+        
+        print("\n--- 奖励统计 ---")
+        print(f"平均总奖励: {summary_stats['avg_total_reward']:.3f}")
+        print(f"中位数总奖励: {summary_stats['median_total_reward']:.3f}")
+        print(f"最小总奖励: {summary_stats['min_total_reward']:.3f}")
+        print(f"最大总奖励: {summary_stats['max_total_reward']:.3f}")
+        
+        print("\n--- 动作类型统计 ---")
+        print(f"平均翻棋动作数: {summary_stats['avg_reveal_actions']:.2f}")
+        print(f"平均移动动作数: {summary_stats['avg_move_actions']:.2f}")
+        print(f"平均炮击动作数: {summary_stats['avg_cannon_actions']:.2f}")
+        
+        print("\n--- 性能指标 ---")
+        print(f"总步数: {summary_stats['total_steps']}")
+        print(f"步数执行速度: {summary_stats['steps_per_second']:.2f} 步/秒")
+        print(f"平均动作选择时间: {summary_stats['avg_action_selection_time']*1000:.3f} 毫秒")
+        print(f"平均环境步进时间: {summary_stats['avg_env_step_time']*1000:.3f} 毫秒")
+        
+        # 找出最快和最慢的游戏
+        fastest_game = min(game_stats, key=lambda x: x['game_time'])
+        slowest_game = max(game_stats, key=lambda x: x['game_time'])
+        
+        print("\n--- 极值分析 ---")
+        print(f"最快游戏: 第{fastest_game['game_index']}局，用时{fastest_game['game_time']:.4f}秒，{fastest_game['steps']}步")
+        print(f"最慢游戏: 第{slowest_game['game_index']}局，用时{slowest_game['game_time']:.4f}秒，{slowest_game['steps']}步")
+
+    def _calculate_comparison_metrics(self, new_stats, old_stats):
+        """计算新旧版本的对比指标"""
+        comparison = {}
+        
+        # 计算性能提升比例
+        metrics_to_compare = [
+            'games_per_second', 'steps_per_second', 'avg_time_per_game',
+            'avg_game_time', 'avg_env_step_time', 'avg_action_selection_time'
+        ]
+        
+        for metric in metrics_to_compare:
+            old_val = old_stats.get(metric, 0)
+            new_val = new_stats.get(metric, 0)
+            
+            if old_val != 0:
+                if metric in ['avg_time_per_game', 'avg_game_time', 'avg_env_step_time', 'avg_action_selection_time']:
+                    # 对于时间指标，值越小越好
+                    improvement = (old_val - new_val) / old_val * 100
+                else:
+                    # 对于速度指标，值越大越好
+                    improvement = (new_val - old_val) / old_val * 100
+                
+                comparison[f'{metric}_improvement_percent'] = improvement
+            else:
+                comparison[f'{metric}_improvement_percent'] = 0
+        
+        return comparison
+    
+    def _print_comparison_report(self, new_stats, old_stats):
+        """打印详细的对比报告"""
+        print("新旧版本性能对比报告")
+        print("=" * 60)
+        
+        # 主要性能指标对比
+        print("\n--- 主要性能指标对比 ---")
+        print(f"{'指标':<25} {'新版本':<15} {'旧版本':<15} {'提升':<10}")
+        print("-" * 65)
+        
+        metrics = [
+            ('游戏执行速度(局/秒)', 'games_per_second', '{:.2f}'),
+            ('步数执行速度(步/秒)', 'steps_per_second', '{:.2f}'),
+            ('平均每局时间(秒)', 'avg_time_per_game', '{:.4f}'),
+            ('平均游戏时间(秒)', 'avg_game_time', '{:.4f}'),
+            ('环境步进时间(毫秒)', 'avg_env_step_time', '{:.3f}'),
+            ('动作选择时间(毫秒)', 'avg_action_selection_time', '{:.3f}'),
+        ]
+        
+        comparison = self._calculate_comparison_metrics(new_stats, old_stats)
+        
+        for name, key, fmt in metrics:
+            new_val = new_stats.get(key, 0)
+            old_val = old_stats.get(key, 0)
+            
+            # 对时间指标转换为毫秒显示
+            if 'time' in key and key != 'avg_time_per_game' and key != 'avg_game_time':
+                new_val *= 1000
+                old_val *= 1000
+            
+            improvement = comparison.get(f'{key}_improvement_percent', 0)
+            improvement_str = f"{improvement:+.1f}%" if improvement != 0 else "N/A"
+            
+            print(f"{name:<25} {fmt.format(new_val):<15} {fmt.format(old_val):<15} {improvement_str:<10}")
+        
+        # 总结
+        print("\n--- 性能提升总结 ---")
+        game_speed_improvement = comparison.get('games_per_second_improvement_percent', 0)
+        step_speed_improvement = comparison.get('steps_per_second_improvement_percent', 0)
+        game_time_improvement = comparison.get('avg_game_time_improvement_percent', 0)
+        
+        print(f"游戏执行速度提升: {game_speed_improvement:+.1f}%")
+        print(f"步数执行速度提升: {step_speed_improvement:+.1f}%")
+        print(f"游戏时间减少: {game_time_improvement:+.1f}%")
+        
+        if game_speed_improvement > 0:
+            print(f"\n✓ 新版本在游戏执行速度上有 {game_speed_improvement:.1f}% 的提升")
+        elif game_speed_improvement < 0:
+            print(f"\n✗ 新版本在游戏执行速度上有 {abs(game_speed_improvement):.1f}% 的下降")
+        else:
+            print(f"\n- 新版本与旧版本在游戏执行速度上基本相同")
+        
+        # 内存使用和其他指标对比
+        print("\n--- 游戏特征对比 ---")
+        print(f"{'特征':<20} {'新版本':<15} {'旧版本':<15}")
+        print("-" * 50)
+        
+        feature_metrics = [
+            ('平均步数', 'avg_steps_per_game'),
+            ('平均翻棋动作', 'avg_reveal_actions'),
+            ('平均移动动作', 'avg_move_actions'),
+            ('平均炮击动作', 'avg_cannon_actions'),
+            ('平均总奖励', 'avg_total_reward'),
+        ]
+        
+        for name, key in feature_metrics:
+            new_val = new_stats.get(key, 0)
+            old_val = old_stats.get(key, 0)
+            print(f"{name:<20} {new_val:<15.2f} {old_val:<15.2f}")
+
+# ==============================================================================
+# --- 新增功能：深度性能剖析 ---
+# ==============================================================================
+def profile_environment(env_class, version_name, num_games=10, max_steps=1000, random_seed=42):
+    """
+    使用 cProfile 对指定的游戏环境运行多局游戏进行性能剖析
+
+    Args:
+        env_class: 要测试的环境类 (e.g., NewGameEnvironment)
+        version_name: 版本名称，用于显示 (e.g., "新版本")
+        num_games: 用于剖析的游戏局数
+        max_steps: 每局最大步数
+        random_seed: 随机种子
+    """
+    print("\n" + "=" * 60)
+    print(f"开始对 {version_name} 进行深度性能剖析 ({num_games} 局游戏)")
+    print("=" * 60)
+
+    # 初始化环境和profiler
+    env = env_class()
+    env.reset(seed=random_seed)
+    profiler = cProfile.Profile()
+    
+    # 将游戏循环置于 profiler 的监控下
+    profiler.enable()
+    
+    for _ in range(num_games):
+        obs, info = env.reset()
+        for step in range(max_steps):
+            action_mask = info.get('action_mask', np.ones(env.action_space.n))
+            valid_actions = np.where(action_mask)[0]
+            if len(valid_actions) == 0:
+                break
+            action = np.random.choice(valid_actions)
+            obs, reward, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                break
+    
+    profiler.disable()
+    
+    # 打印剖析结果
+    s = StringIO()
+    # sort_stats('cumulative') 会将时间花在最深层函数调用栈上的函数排在最前面
+    stats = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+    stats.print_stats(30) # 打印前30个最耗时的函数
+    
+    print(s.getvalue())
+    print(f"--- {version_name} 剖析报告结束 ---\n")
+    print("报告解读提示:")
+    print("  - ncalls: 函数被调用的总次数")
+    print("  - tottime: 函数本身执行所花费的总时间 (不包括其调用的子函数)")
+    print("  - percall (tottime/ncalls): 函数单次执行的平均时间")
+    print("  - cumtime: 函数及其所有子函数执行所花费的累计时间")
+    print("  - percall (cumtime/ncalls): 函数单次调用（包括子函数）的平均时间")
+    print("  - filename:lineno(function): 函数位置")
+    print("\n请重点关注 'cumtime' 和 'tottime' 最高的函数，它们是性能瓶颈所在。")
+
+
+def main():
+    """主函数 - 运行性能测试"""
+    # 可配置参数
+    RANDOM_SEED = 42
+    NUM_GAMES = 1000
+    MAX_STEPS_PER_GAME = 1000
+    PROFILE_GAMES = 10 # 用于profile的局数，不宜过多，否则报告太长
+    
+    # 检查命令行参数
+    if len(sys.argv) > 1:
+        test_mode = sys.argv[1].lower()
+        if test_mode not in ['new', 'old', 'both', 'profile']: # 新增 profile 模式
+            print("用法: python performance_test.py [new|old|both|profile]")
+            print("  new      - 只测试新版本")
+            print("  old      - 只测试旧版本")
+            print("  both     - 对比测试新旧版本 (默认)")
+            print("  profile  - 对新旧版本进行深度性能剖析")
+            sys.exit(1)
+    else:
+        test_mode = 'both'  # 默认进行对比测试
+    
+    # 检查旧版本可用性
+    if test_mode in ['old', 'both', 'profile'] and not OLD_VERSION_AVAILABLE:
+        print("错误: 旧版本 Game_oldversion.py 不可用")
+        if test_mode == 'both' or test_mode == 'profile':
+            print("将只测试新版本...")
+            test_mode = 'new' if test_mode != 'profile' else 'profile_new_only'
+        else:
+            sys.exit(1)
+            
+    tester = PerformanceTester(random_seed=RANDOM_SEED)
+
+    # --- 根据模式选择执行的逻辑 ---
+    
+    if test_mode == 'profile':
+        profile_environment(NewGameEnvironment, "新版本 (Bitboard)", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
+        if OLD_VERSION_AVAILABLE:
+            profile_environment(OldGameEnvironment, "旧版本 (Numpy)", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
+
+    elif test_mode == 'profile_new_only':
+         profile_environment(NewGameEnvironment, "新版本 (Bitboard)", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
+
+    elif test_mode == 'both':
+        print("开始新旧版本对比测试...")
+        tester.run_comparison_test(
+            num_games=NUM_GAMES,
+            max_steps_per_game=MAX_STEPS_PER_GAME
+        )
+        
+    else: # new or old
+        version_name = "新版本" if test_mode == 'new' else "旧版本"
+        print(f"开始{version_name}性能测试...")
+        
+        tester.run_performance_test(
+            num_games=NUM_GAMES,
+            max_steps_per_game=MAX_STEPS_PER_GAME,
+            version=test_mode
+        )
+
+if __name__ == "__main__":
+    main()
