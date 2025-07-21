@@ -178,7 +178,9 @@ class GameEnvironment(gym.Env):
     def _bitboard_to_plane(self, bb): return (bb >> np.arange(self.TOTAL_POSITIONS)) & 1
 
     def step(self, action_index):
-        raw_reward = 0
+        # 引入时间惩罚 - 鼓励模型尽快获胜
+        reward = -0.0005
+        
         coords = self.action_to_coords.get(action_index)
         if coords is None: raise ValueError(f"Invalid action_index: {action_index}")
 
@@ -187,6 +189,8 @@ class GameEnvironment(gym.Env):
             move = Move(from_sq, from_sq, ACTION_TYPE_REVEAL)
             self._apply_reveal_update(move)
             self.move_counter = 0
+            # 翻棋的额外奖励
+            reward += 0.0005
         else:
             from_sq, to_sq = POS_TO_SQ[coords[0]], POS_TO_SQ[coords[1]]
             attacker = self.board[from_sq]
@@ -195,10 +199,39 @@ class GameEnvironment(gym.Env):
             else:
                 move = Move(from_sq, to_sq, ACTION_TYPE_MOVE)
             raw_reward = self._apply_move_action(move)
+            # 吃子的额外奖励
+            reward += raw_reward / self.WINNING_SCORE if self.WINNING_SCORE > 0 else raw_reward
         
+        # --- 检查游戏结束条件 ---
+        terminated = False
+        truncated = False
+        winner = None
+
+        if self.scores[1] >= self.WINNING_SCORE:
+            winner = 1
+            terminated = True
+        elif self.scores[-1] >= self.WINNING_SCORE:
+            winner = -1
+            terminated = True
+        elif self.move_counter >= self.MAX_CONSECUTIVE_MOVES:
+            winner = 0  # 平局
+            truncated = True  # 因达到最大步数而截断
+
         self.current_player = -self.current_player
-        reward = raw_reward / self.WINNING_SCORE if self.WINNING_SCORE > 0 else raw_reward
-        return self.get_state(), reward, False, False, {'action_mask': self.action_masks()}
+        
+        # 检查新玩家是否有合法动作
+        if not terminated and not truncated and np.sum(self.action_masks()) == 0:
+            winner = -self.current_player  # 当前玩家无棋可走，对方获胜
+            terminated = True
+            
+        info = {'winner': winner, 'action_mask': self.action_masks()}
+        
+        # 如果需要，在 episode 结束时渲染
+        if terminated or truncated:
+            if self.render_mode == "human":
+                self.render()
+
+        return self.get_state(), reward, terminated, truncated, info
 
     def _apply_reveal_update(self, move: Move):
         piece = self.board[move.from_sq]; piece.revealed = True
