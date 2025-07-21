@@ -192,10 +192,9 @@ class GameEnvironment(gym.Env):
             attacker = self.board[from_sq]
             if attacker.piece_type == PieceType.CANNON:
                 move = Move(from_sq, to_sq, ACTION_TYPE_CANNON_ATTACK)
-                raw_reward = self._handle_cannon_attack(move)
             else:
                 move = Move(from_sq, to_sq, ACTION_TYPE_MOVE)
-                raw_reward = self._apply_move_action(move)
+            raw_reward = self._apply_move_action(move)
         
         self.current_player = -self.current_player
         reward = raw_reward / self.WINNING_SCORE if self.WINNING_SCORE > 0 else raw_reward
@@ -208,43 +207,55 @@ class GameEnvironment(gym.Env):
 
     def _apply_move_action(self, move: Move):
         attacker = self.board[move.from_sq]
+        
+        # 处理移动到空位的情况（只有普通移动会遇到）
         if self.board[move.to_sq] is None:
             move_mask = ULL(move.from_sq) | ULL(move.to_sq)
             self.piece_bitboards[attacker.player][attacker.piece_type.value] ^= move_mask
-            self.revealed_bitboards[attacker.player] ^= move_mask; self.empty_bitboard ^= move_mask
+            self.revealed_bitboards[attacker.player] ^= move_mask
+            self.empty_bitboard ^= move_mask
             self.board[move.to_sq], self.board[move.from_sq] = attacker, None
-            self.move_counter += 1; return 0
-        else:
-            defender = self.board[move.to_sq]
-            attacker_move_mask = ULL(move.from_sq) | ULL(move.to_sq)
-            self.piece_bitboards[attacker.player][attacker.piece_type.value] ^= attacker_move_mask
-            self.revealed_bitboards[attacker.player] ^= attacker_move_mask
-            defender_remove_mask = ULL(move.to_sq)
-            self.piece_bitboards[defender.player][defender.piece_type.value] ^= defender_remove_mask
-            self.revealed_bitboards[defender.player] ^= defender_remove_mask
-            self.empty_bitboard |= ULL(move.from_sq); self.dead_pieces[defender.player].append(defender)
-            self.board[move.to_sq], self.board[move.from_sq] = attacker, None
-            self.move_counter = 0; points = self.PIECE_VALUES[defender.piece_type]
-            self.scores[attacker.player] += points; return float(points)
-
-    def _handle_cannon_attack(self, move: Move):
-        attacker, defender = self.board[move.from_sq], self.board[move.to_sq]
+            self.move_counter += 1
+            return 0
+        
+        # 处理攻击/吃子的情况
+        defender = self.board[move.to_sq]
         points = self.PIECE_VALUES[defender.piece_type]
-        if defender.player == attacker.player: self.scores[-attacker.player] += points
-        else: self.scores[attacker.player] += points
+        
+        # 计算得分（炮攻击有特殊的友军伤害逻辑）
+        if move.action_type == ACTION_TYPE_CANNON_ATTACK:
+            if defender.player == attacker.player:
+                self.scores[-attacker.player] += points
+                reward = -float(points)
+            else:
+                self.scores[attacker.player] += points
+                reward = float(points)
+        else:
+            # 普通攻击只能攻击敌方棋子
+            self.scores[attacker.player] += points
+            reward = float(points)
+        
+        # 更新攻击方的bitboard
         attacker_move_mask = ULL(move.from_sq) | ULL(move.to_sq)
         self.piece_bitboards[attacker.player][attacker.piece_type.value] ^= attacker_move_mask
         self.revealed_bitboards[attacker.player] ^= attacker_move_mask
+        
+        # 更新被攻击方的bitboard
         defender_remove_mask = ULL(move.to_sq)
         if defender.revealed:
-             self.piece_bitboards[defender.player][defender.piece_type.value] ^= defender_remove_mask
-             self.revealed_bitboards[defender.player] ^= defender_remove_mask
-        else: 
+            self.piece_bitboards[defender.player][defender.piece_type.value] ^= defender_remove_mask
+            self.revealed_bitboards[defender.player] ^= defender_remove_mask
+        else:
+            # 只有炮攻击才能攻击隐藏的棋子
             self.hidden_bitboard ^= defender_remove_mask
-        self.empty_bitboard |= ULL(move.from_sq); self.dead_pieces[defender.player].append(defender)
+        
+        # 更新棋盘状态
+        self.empty_bitboard |= ULL(move.from_sq)
+        self.dead_pieces[defender.player].append(defender)
         self.board[move.to_sq], self.board[move.from_sq] = attacker, None
         self.move_counter = 0
-        return float(points) if defender.player != attacker.player else -float(points)
+        
+        return reward
 
     def action_masks(self):
         action_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=int)
