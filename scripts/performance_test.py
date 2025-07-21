@@ -28,6 +28,14 @@ except ImportError:
     print("警告: 无法导入 Game_oldversion.py，将只测试新版本")
     OLD_VERSION_AVAILABLE = False
 
+# 导入 Cython 优化版本
+try:
+    from Game_cython_simple import GameEnvironment as CythonGameEnvironment
+    CYTHON_VERSION_AVAILABLE = True
+except ImportError:
+    print("警告: 无法导入 Cython 优化版本，将跳过 Cython 测试")
+    CYTHON_VERSION_AVAILABLE = False
+
 
 class PerformanceTester:
     """游戏环境性能测试器"""
@@ -155,8 +163,10 @@ class PerformanceTester:
             env = NewGameEnvironment()
         elif version == 'old' and OLD_VERSION_AVAILABLE:
             env = OldGameEnvironment()
+        elif version == 'cython' and CYTHON_VERSION_AVAILABLE:
+            env = CythonGameEnvironment()
         else:
-            raise ValueError(f"不支持的版本: {version} 或旧版本不可用")
+            raise ValueError(f"不支持的版本: {version} 或对应版本不可用")
         
         env.reset(seed=self.random_seed)
         
@@ -231,6 +241,65 @@ class PerformanceTester:
                 new_results['summary'], old_results['summary']
             )
         }
+    
+    def run_comprehensive_test(self, num_games=1000, max_steps_per_game=1000):
+        """
+        运行全面的性能测试，包括所有可用版本
+        """
+        results = {}
+        
+        print(f"开始全面性能测试 - 每个版本{num_games}局游戏")
+        print(f"使用随机种子: {self.random_seed}")
+        print("=" * 60)
+        
+        # 测试新版本
+        print("\n正在测试新版本 (Bitboard)...")
+        results['new'] = self.run_performance_test(num_games, max_steps_per_game, 'new')
+        
+        # 测试旧版本
+        if OLD_VERSION_AVAILABLE:
+            print("\n" + "=" * 60)
+            print("\n正在测试旧版本 (Numpy)...")
+            results['old'] = self.run_performance_test(num_games, max_steps_per_game, 'old')
+        
+        # 测试 Cython 版本
+        if CYTHON_VERSION_AVAILABLE:
+            print("\n" + "=" * 60)
+            print("\n正在测试 Cython 优化版本...")
+            results['cython'] = self.run_performance_test(num_games, max_steps_per_game, 'cython')
+        
+        # 生成综合对比报告
+        print("\n" + "=" * 60)
+        self._print_comprehensive_report(results)
+        
+        return results
+    
+    def run_single_version_test(self, env_class, version_name, num_games=1000, max_steps_per_game=1000):
+        """
+        运行单个版本的性能测试
+        """
+        print(f"开始 {version_name} 性能测试 - {num_games}局游戏")
+        print(f"使用随机种子: {self.random_seed}")
+        print("=" * 60)
+        
+        # 确定版本标识
+        if env_class == NewGameEnvironment:
+            version = 'new'
+        elif OLD_VERSION_AVAILABLE and env_class == OldGameEnvironment:
+            version = 'old'
+        elif CYTHON_VERSION_AVAILABLE and env_class == CythonGameEnvironment:
+            version = 'cython'
+        else:
+            version = 'unknown'
+        
+        results = self.run_performance_test(num_games, max_steps_per_game, version)
+        
+        print("\n" + "=" * 60)
+        print(f"{version_name} 性能测试结果:")
+        print("=" * 60)
+        self._print_single_version_report(results['summary'], version_name)
+        
+        return results
     
     def _calculate_summary_stats(self, game_stats, total_time):
         """计算汇总统计信息"""
@@ -431,6 +500,77 @@ class PerformanceTester:
             old_val = old_stats.get(key, 0)
             print(f"{name:<20} {new_val:<15.2f} {old_val:<15.2f}")
 
+    def _print_comprehensive_report(self, results):
+        """打印综合性能对比报告"""
+        print("\n综合性能对比报告")
+        print("=" * 80)
+        
+        # 收集所有版本的统计信息
+        versions = []
+        if 'new' in results:
+            versions.append(('新版本 (Bitboard)', results['new']['summary']))
+        if 'old' in results:
+            versions.append(('旧版本 (Numpy)', results['old']['summary']))
+        if 'cython' in results:
+            versions.append(('Cython 优化版本', results['cython']['summary']))
+        
+        if len(versions) < 2:
+            print("需要至少两个版本才能进行对比")
+            return
+        
+        # 打印性能对比表
+        print(f"{'版本':<20} {'游戏/秒':<12} {'步/秒':<12} {'平均游戏时间(ms)':<18} {'平均步时间(ms)':<16}")
+        print("-" * 80)
+        
+        for version_name, stats in versions:
+            games_per_sec = stats.get('games_per_second', 0)
+            steps_per_sec = stats.get('steps_per_second', 0)
+            avg_game_time = stats.get('avg_game_time', 0) * 1000  # 转换为毫秒
+            avg_step_time = stats.get('avg_step_time', 0) * 1000  # 转换为毫秒
+            
+            print(f"{version_name:<20} {games_per_sec:<12.1f} {steps_per_sec:<12.1f} {avg_game_time:<18.3f} {avg_step_time:<16.5f}")
+        
+        # 计算相对于基准版本的加速比
+        if 'new' in results:
+            baseline = results['new']['summary']
+            baseline_name = "新版本"
+        elif 'old' in results:
+            baseline = results['old']['summary']
+            baseline_name = "旧版本"
+        else:
+            return
+            
+        print(f"\n加速比 (相对于{baseline_name}):")
+        print("-" * 50)
+        
+        for version_name, stats in versions:
+            if stats == baseline:
+                continue
+                
+            speedup_games = stats.get('games_per_second', 0) / baseline.get('games_per_second', 1)
+            speedup_steps = stats.get('steps_per_second', 0) / baseline.get('steps_per_second', 1)
+            
+            print(f"{version_name}: 游戏执行 {speedup_games:.2f}x, 步执行 {speedup_steps:.2f}x")
+
+    def _print_single_version_report(self, stats, version_name):
+        """打印单个版本的性能报告"""
+        print(f"{version_name} 性能统计:")
+        print("-" * 40)
+        print(f"总游戏局数: {stats.get('total_games', 0)}")
+        print(f"总执行时间: {stats.get('total_time', 0):.3f} 秒")
+        print(f"平均每局时间: {stats.get('avg_game_time', 0)*1000:.3f} 毫秒")
+        print(f"游戏执行速度: {stats.get('games_per_second', 0):.1f} 局/秒")
+        print(f"步执行速度: {stats.get('steps_per_second', 0):.1f} 步/秒")
+        print(f"平均步时间: {stats.get('avg_step_time', 0)*1000:.5f} 毫秒")
+        print(f"平均每局步数: {stats.get('avg_steps_per_game', 0):.1f}")
+        print(f"平均总奖励: {stats.get('avg_total_reward', 0):.2f}")
+        
+        # 动作类型统计
+        print(f"\n动作类型分布:")
+        print(f"平均翻棋动作: {stats.get('avg_reveal_actions', 0):.1f}")
+        print(f"平均移动动作: {stats.get('avg_move_actions', 0):.1f}")
+        print(f"平均炮击动作: {stats.get('avg_cannon_actions', 0):.1f}")
+
 # ==============================================================================
 # --- 新增功能：深度性能剖析 ---
 # ==============================================================================
@@ -500,36 +640,55 @@ def main():
     # 检查命令行参数
     if len(sys.argv) > 1:
         test_mode = sys.argv[1].lower()
-        if test_mode not in ['new', 'old', 'both', 'profile']: # 新增 profile 模式
-            print("用法: python performance_test.py [new|old|both|profile]")
+        if test_mode not in ['new', 'old', 'both', 'cython', 'all', 'profile']: # 新增 cython 和 all 模式
+            print("用法: python performance_test.py [new|old|both|cython|all|profile]")
             print("  new      - 只测试新版本")
             print("  old      - 只测试旧版本")
-            print("  both     - 对比测试新旧版本 (默认)")
-            print("  profile  - 对新旧版本进行深度性能剖析")
+            print("  both     - 对比测试新旧版本")
+            print("  cython   - 只测试 Cython 优化版本")
+            print("  all      - 测试所有可用版本")
+            print("  profile  - 对所有版本进行深度性能剖析")
             sys.exit(1)
     else:
-        test_mode = 'both'  # 默认进行对比测试
+        test_mode = 'all'  # 默认测试所有版本
     
-    # 检查旧版本可用性
-    if test_mode in ['old', 'both', 'profile'] and not OLD_VERSION_AVAILABLE:
-        print("错误: 旧版本 Game_oldversion.py 不可用")
-        if test_mode == 'both' or test_mode == 'profile':
-            print("将只测试新版本...")
-            test_mode = 'new' if test_mode != 'profile' else 'profile_new_only'
-        else:
-            sys.exit(1)
+    # 检查版本可用性
+    if test_mode in ['old', 'both', 'all', 'profile'] and not OLD_VERSION_AVAILABLE:
+        print("警告: 旧版本 Game_oldversion.py 不可用")
+        
+    if test_mode in ['cython', 'all', 'profile'] and not CYTHON_VERSION_AVAILABLE:
+        print("警告: Cython 优化版本不可用")
             
     tester = PerformanceTester(random_seed=RANDOM_SEED)
 
     # --- 根据模式选择执行的逻辑 ---
     
     if test_mode == 'profile':
+        print("开始深度性能剖析...")
         profile_environment(NewGameEnvironment, "新版本 (Bitboard)", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
         if OLD_VERSION_AVAILABLE:
             profile_environment(OldGameEnvironment, "旧版本 (Numpy)", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
+        if CYTHON_VERSION_AVAILABLE:
+            profile_environment(CythonGameEnvironment, "Cython 优化版本", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
 
-    elif test_mode == 'profile_new_only':
-         profile_environment(NewGameEnvironment, "新版本 (Bitboard)", num_games=PROFILE_GAMES, random_seed=RANDOM_SEED)
+    elif test_mode == 'all':
+        print("开始全面性能对比测试...")
+        tester.run_comprehensive_test(
+            num_games=NUM_GAMES,
+            max_steps_per_game=MAX_STEPS_PER_GAME
+        )
+    
+    elif test_mode == 'cython':
+        if CYTHON_VERSION_AVAILABLE:
+            print("开始 Cython 版本性能测试...")
+            tester.run_single_version_test(
+                CythonGameEnvironment, "Cython 优化版本",
+                num_games=NUM_GAMES,
+                max_steps_per_game=MAX_STEPS_PER_GAME
+            )
+        else:
+            print("错误: Cython 版本不可用")
+            sys.exit(1)
 
     elif test_mode == 'both':
         print("开始新旧版本对比测试...")

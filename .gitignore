@@ -1,2 +1,26 @@
-__pycache__
-banqi_ppo_logs
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.c
+*.html
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Test results and coverage reports
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+banqi_ppo_logs/
+
+# VSCode specific
+.vscode/

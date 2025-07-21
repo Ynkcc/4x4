@@ -1,4 +1,4 @@
-# Game.py (Bitboard Version - Complete)
+# Game_bitboard_unfinished
 
 import random
 from enum import Enum
