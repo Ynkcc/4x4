@@ -1,10 +1,5 @@
-# game_gui.py - 使用 Cython 优化版本
+# game_gui.py
 import sys
-import os
-
-# 添加上级目录到 Python 路径，以便导入 Game_cython
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGridLayout, QHBoxLayout,
     QVBoxLayout, QPushButton, QLabel, QFrame, QGroupBox, QFormLayout,
@@ -14,8 +9,8 @@ from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtCore import Qt, QSize
 import numpy as np
 
-# 导入 Cython 优化的游戏环境
-from Game_cython import GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ
+# 导入您的游戏环境
+from Game import GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ
 
 class BitboardGridWidget(QWidget):
     """一个专门用于可视化单个bitboard的4x4网格小部件。"""
@@ -336,27 +331,14 @@ class MainWindow(QMainWindow):
 
     def update_bitboard_display(self):
         """更新所有Bitboard的可视化网格。"""
-        # 为了兼容 Cython 版本，使用访问方法
-        try:
-            # 如果是 Cython 版本，使用访问方法
-            self.hidden_bb_widget.update_bitboard(self.game.get_hidden_bitboard())
-            self.empty_bb_widget.update_bitboard(self.game.get_empty_bitboard())
-            
-            for p in [1, -1]:
-                self.player_bb_widgets[p]['revealed'].update_bitboard(self.game.get_revealed_bitboard(p))
-                for pt in PieceType:
-                    bb_val = self.game.get_piece_bitboard(p, pt.value)
-                    self.player_bb_widgets[p][pt.value].update_bitboard(bb_val)
-        except AttributeError:
-            # 如果是原版，使用直接访问
-            self.hidden_bb_widget.update_bitboard(self.game.hidden_bitboard)
-            self.empty_bb_widget.update_bitboard(self.game.empty_bitboard)
+        self.hidden_bb_widget.update_bitboard(self.game.hidden_bitboard)
+        self.empty_bb_widget.update_bitboard(self.game.empty_bitboard)
 
-            for p in [1, -1]:
-                self.player_bb_widgets[p]['revealed'].update_bitboard(self.game.revealed_bitboards[p])
-                for pt in PieceType:
-                    bb_val = self.game.piece_bitboards[p][pt.value]
-                    self.player_bb_widgets[p][pt.value].update_bitboard(bb_val)
+        for p in [1, -1]:
+            self.player_bb_widgets[p]['revealed'].update_bitboard(self.game.revealed_bitboards[p])
+            for pt in PieceType:
+                bb_val = self.game.piece_bitboards[p][pt.value]
+                self.player_bb_widgets[p][pt.value].update_bitboard(bb_val)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

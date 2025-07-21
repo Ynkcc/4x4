@@ -24,3 +24,4 @@ banqi_ppo_logs/
 
 # VSCode specific
 .vscode/
+Game_cython.cpp
