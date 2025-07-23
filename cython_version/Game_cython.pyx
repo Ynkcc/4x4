@@ -7,12 +7,13 @@ import numpy as np
 cimport numpy as np
 import collections
 import gymnasium as gym
-from gymnasium import spaces
+from gymnasium import spaces, Wrapper
 
 # 导入cython的装饰器，用于微调性能
 import cython
 from libc.stdlib cimport rand, srand
 
+np.import_array()
 # ==============================================================================
 # --- 类型定义 ---
 # ==============================================================================
@@ -34,7 +35,7 @@ cdef bitboard ULL(int x):
 cdef int trailing_zeros(bitboard bb):
     """计算末尾零的数量，等效于找到最低位1的位置 (LSB)"""
     if bb == 0:
-        return 64  # 改为返回64，表示没有置位，避免无效的-1
+        return 64
     cdef int count = 0
     while (bb & 1) == 0:
         bb >>= 1
@@ -47,7 +48,6 @@ cdef int msb_pos(bitboard n):
     """计算最高有效位的位置 (MSB), 类似于 Python 的 int.bit_length() - 1"""
     if n == 0: return -1
     cdef int pos = 0
-    # 使用二分搜索法快速定位最高位
     if n & 0xffffffff00000000ULL: pos += 32; n >>= 32
     if n & 0x00000000ffff0000ULL: pos += 16; n >>= 16
     if n & 0x000000000000ff00ULL: pos += 8;  n >>= 8
@@ -62,18 +62,16 @@ cdef int pop_lsb(bitboard* bb):
     """弹出并返回最低位的位置，同时更新bitboard"""
     if bb[0] == 0: return -1
     cdef int pos = trailing_zeros(bb[0])
-    bb[0] &= bb[0] - 1  # 清除最低位
+    bb[0] &= bb[0] - 1
     return pos
 
 # ==============================================================================
 # --- Cython 优化: 类型定义和常量 ---
 # ==============================================================================
 
-# 使用 cdef enum 来创建C语言级别的枚举，比Python的Enum更快
 cdef enum PieceTypeEnum:
     SOLDIER, CANNON, HORSE, CHARIOT, ELEPHANT, ADVISOR, GENERAL
 
-# 使用C常量代替Python常量（使用DEF以便编译时确定）
 DEF BOARD_ROWS = 4
 DEF BOARD_COLS = 4
 DEF NUM_PIECE_TYPES = 7
@@ -87,21 +85,17 @@ DEF ACTION_SPACE_SIZE = 112
 DEF MAX_CONSECUTIVE_MOVES = 40
 DEF WINNING_SCORE = 60
 
-# 常量数组 (使用全局数组)
-cdef int[7] PIECE_VALUES = [4, 10, 10, 10, 10, 20, 30]  # SOLDIER to GENERAL
-cdef int[7] PIECE_MAX_COUNTS = [2, 1, 1, 1, 1, 1, 1]   # SOLDIER to GENERAL
+cdef int[7] PIECE_VALUES = [4, 10, 10, 10, 10, 20, 30]
+cdef int[7] PIECE_MAX_COUNTS = [2, 1, 1, 1, 1, 1, 1]
 
-# 位置转换字典在初始化时创建，保持为Python对象
 POS_TO_SQ = {(r, c): r * 4 + c for r in range(4) for c in range(4)}
 SQ_TO_POS = {sq: (sq // 4, sq % 4) for sq in range(16)}
 
-# 边栏常量以处理换行问题
 cdef bitboard FILE_A = ULL(0) | ULL(4) | ULL(8) | ULL(12)
 cdef bitboard FILE_H = ULL(3) | ULL(7) | ULL(11) | ULL(15)
 cdef bitboard NOT_FILE_A = ~FILE_A
 cdef bitboard NOT_FILE_H = ~FILE_H
 
-# Piece类保持为Python类，因为它存储复杂状态
 class Piece:
     """棋子对象，存储棋子本身的属性（类型，玩家，是否翻开）。"""
     def __init__(self, piece_type, player):
@@ -109,43 +103,28 @@ class Piece:
     def __repr__(self):
         return f"{'R' if self.revealed else 'H'}_{'R' if self.player == 1 else 'B'}{self.piece_type.name}"
 
-# 将Python Enum暴露给外部使用
 class PieceType(Enum):
     SOLDIER = 0; CANNON = 1; HORSE = 2; CHARIOT = 3
     ELEPHANT = 4; ADVISOR = 5; GENERAL = 6
 
-# 将 class 声明为 cdef class 以获得更好的性能
 cdef class GameEnvironment:
-    # --- C 级别变量声明 ---
-    cdef bitboard piece_bitboards[2][7] # NUM_PIECE_TYPES = 7
+    cdef bitboard piece_bitboards[2][7]
     cdef bitboard revealed_bitboards[2]
     cdef bitboard hidden_bitboard, empty_bitboard
     cdef public int current_player
     cdef public int move_counter
-    
-    # Python 可访问的属性
     cdef public object scores, dead_pieces, board
     cdef public object action_to_coords, coords_to_action, attack_tables
     cdef public object np_random, observation_space, action_space, render_mode
-    
-    # 添加常量属性，供GUI访问
     cdef public int ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT, MAX_CONSECUTIVE_MOVES
-    
-    # 状态向量索引
     cdef public int _my_pieces_plane_start_idx
     cdef public int _opponent_pieces_plane_start_idx
     cdef public int _hidden_pieces_plane_start_idx
     cdef public int _empty_plane_start_idx
     cdef public int _scalar_features_start_idx
-    
-    # --- Gymnasium 环境元数据 ---
-    # metadata = {'render_modes': ['human'], 'render_fps': 4}  # 注释掉，因为cdef class不支持类变量
 
     def __init__(self, render_mode=None):
-        # 由于是cdef class，需要手动初始化gym.Env的功能
         self.render_mode = render_mode
-        
-        # 设置常量属性
         self.ACTION_SPACE_SIZE = ACTION_SPACE_SIZE
         self.REVEAL_ACTIONS_COUNT = REVEAL_ACTIONS_COUNT
         self.REGULAR_MOVE_ACTIONS_COUNT = REGULAR_MOVE_ACTIONS_COUNT
@@ -168,41 +147,32 @@ cdef class GameEnvironment:
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(state_size,), dtype=np.float32)
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
 
-        # 核心状态数据结构 (使用Python对象)
         self.board = np.empty(TOTAL_POSITIONS, dtype=object)
         self.dead_pieces = {-1: [], 1: []}
         self.scores = {-1: 0, 1: 0}
 
-        # 统一查找表
         self.attack_tables = {}
         self.action_to_coords = {}
         self.coords_to_action = {}
         self._initialize_lookup_tables()
     
     cpdef _initialize_lookup_tables(self):
-        """在游戏开始前，一次性预计算所有需要的查找表，构建统一动作空间。"""
-        # 炮的射线表 (用于action_masks)
         ray_attacks = [[0] * TOTAL_POSITIONS for _ in range(4)]
         cdef int sq, r, c, i
         for sq in range(TOTAL_POSITIONS):
-            r = sq // 4
-            c = sq % 4
-            for i in range(r - 1, -1, -1): ray_attacks[0][sq] |= ULL(i * 4 + c)  # N
-            for i in range(r + 1, 4):      ray_attacks[1][sq] |= ULL(i * 4 + c)  # S
-            for i in range(c - 1, -1, -1): ray_attacks[2][sq] |= ULL(r * 4 + i)  # W
-            for i in range(c + 1, 4):      ray_attacks[3][sq] |= ULL(r * 4 + i)  # E
+            r, c = sq // 4, sq % 4
+            for i in range(r - 1, -1, -1): ray_attacks[0][sq] |= ULL(i * 4 + c)
+            for i in range(r + 1, 4):      ray_attacks[1][sq] |= ULL(i * 4 + c)
+            for i in range(c - 1, -1, -1): ray_attacks[2][sq] |= ULL(r * 4 + i)
+            for i in range(c + 1, 4):      ray_attacks[3][sq] |= ULL(r * 4 + i)
         self.attack_tables['rays'] = ray_attacks
         
-        # 构建统一查找表
         cdef int action_idx = 0
-        
-        # 翻棋动作
         for sq in range(TOTAL_POSITIONS):
             self.action_to_coords[action_idx] = SQ_TO_POS[sq]
             self.coords_to_action[SQ_TO_POS[sq]] = action_idx
             action_idx += 1
             
-        # 普通移动动作
         cdef int from_sq, to_sq
         for from_sq in range(TOTAL_POSITIONS):
             r, c = SQ_TO_POS[from_sq]
@@ -212,7 +182,6 @@ cdef class GameEnvironment:
             if c > 0: to_sq = from_sq - 1; self.action_to_coords[action_idx] = (from_pos, SQ_TO_POS[to_sq]); self.coords_to_action[(from_pos, SQ_TO_POS[to_sq])] = action_idx; action_idx += 1
             if c < 3: to_sq = from_sq + 1; self.action_to_coords[action_idx] = (from_pos, SQ_TO_POS[to_sq]); self.coords_to_action[(from_pos, SQ_TO_POS[to_sq])] = action_idx; action_idx += 1
 
-        # 炮的攻击动作
         cdef int r1, c1, r2, c2
         for r1 in range(BOARD_ROWS):
             for c1 in range(BOARD_COLS):
@@ -224,14 +193,11 @@ cdef class GameEnvironment:
 
     @cython.cfunc
     cdef void _initialize_board(self):
-        """初始化棋盘和所有状态变量 (C函数)。"""
-        # 创建棋子列表 - 与Bitboard版本保持一致的顺序
         pieces = []
-        # 按照PieceType枚举的顺序创建棋子
         for pt in PieceType:
             count = PIECE_MAX_COUNTS[pt.value]
             for p in [1, -1]:
-                for _ in range(count):
+                 for _ in range(count):
                     pieces.append(Piece(pt, p))
 
         if self.np_random is not None:
@@ -256,11 +222,13 @@ cdef class GameEnvironment:
         self.move_counter = 0
         self.scores = {-1: 0, 1: 0}
 
-    # 这是 Gym API 的一部分，必须是cpdef或def
+    @property
+    def unwrapped(self):
+        """返回环境本身，用于 Gymnasium 兼容性"""
+        return self
+
     def reset(self, seed=None, options=None):
-        # 使用与Gymnasium相同的随机数生成器设置方式
         if seed is not None:
-            # 使用numpy的新式Generator，与Gymnasium保持一致
             self.np_random = np.random.default_rng(seed)
         self._initialize_board()
         return self.get_state(), {'action_mask': self.action_masks()}
@@ -268,28 +236,23 @@ cdef class GameEnvironment:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     def get_state(self):
-        # 使用np.float32_t类型来匹配numpy数组
         cdef np.ndarray[np.float32_t, ndim=1] state = np.zeros(self.observation_space.shape[0], dtype=np.float32)
         cdef int my_player = self.current_player
         cdef int opponent_player = -self.current_player
         cdef int my_player_idx = 1 if my_player == 1 else 0
         cdef int opponent_player_idx = 1 if opponent_player == 1 else 0
-        
         cdef int pt_val, start_idx
         cdef bitboard bb
 
         for pt_val in range(NUM_PIECE_TYPES):
-            # My pieces
             bb = self.piece_bitboards[my_player_idx][pt_val]
             start_idx = self._my_pieces_plane_start_idx + pt_val * TOTAL_POSITIONS
             self._bitboard_to_plane(bb, state, start_idx)
             
-            # Opponent pieces
             bb = self.piece_bitboards[opponent_player_idx][pt_val]
             start_idx = self._opponent_pieces_plane_start_idx + pt_val * TOTAL_POSITIONS
             self._bitboard_to_plane(bb, state, start_idx)
 
-        # Hidden and Empty planes
         self._bitboard_to_plane(self.hidden_bitboard, state, self._hidden_pieces_plane_start_idx)
         self._bitboard_to_plane(self.empty_bitboard, state, self._empty_plane_start_idx)
         
@@ -306,7 +269,6 @@ cdef class GameEnvironment:
     @cython.cfunc
     @cython.inline
     cdef void _bitboard_to_plane(self, bitboard bb, np.ndarray[np.float32_t, ndim=1] plane, int start_idx):
-        """一个高效的C函数，将bitboard填充到numpy数组的指定平面"""
         cdef int i
         for i in range(TOTAL_POSITIONS):
             if (bb >> i) & 1:
@@ -314,7 +276,6 @@ cdef class GameEnvironment:
             else:
                 plane[start_idx + i] = 0.0
 
-    # 这是 Gym API 的一部分，必须是cpdef或def
     def step(self, int action_index):
         cdef double reward = -0.0005
         cdef object coords = self.action_to_coords.get(action_index)
@@ -325,7 +286,6 @@ cdef class GameEnvironment:
         cdef object attacker
         cdef double raw_reward
 
-        # 检查是否是翻棋动作
         if action_index < REVEAL_ACTIONS_COUNT:
             from_sq = POS_TO_SQ[coords]
             self._apply_reveal_update(from_sq)
@@ -360,7 +320,7 @@ cdef class GameEnvironment:
         if (terminated or truncated) and self.render_mode == "human":
             self.render()
 
-        return self.get_state(), reward, terminated, truncated, info
+        return self.get_state(), np.float32(reward), terminated, truncated, info
 
     @cython.cfunc
     cdef void _apply_reveal_update(self, int from_sq):
@@ -385,7 +345,6 @@ cdef class GameEnvironment:
         cdef int points
         cdef double reward = 0.0
 
-        # 情况1: 移动到空格
         if defender is None:
             self.board[to_sq], self.board[from_sq] = attacker, None
             move_mask = attacker_mask | defender_mask
@@ -395,12 +354,10 @@ cdef class GameEnvironment:
             self.move_counter += 1
             return 0.0
 
-        # 情况2: 攻击/吃子
         defender_player_idx = 1 if defender.player == 1 else 0
         points = PIECE_VALUES[defender.piece_type.value]
 
-        # 计算得分
-        is_cannon_attack = attacker_type_val == 1  # CANNON = 1
+        is_cannon_attack = attacker_type_val == 1
         if is_cannon_attack and attacker.player == defender.player:
             self.scores[-attacker.player] += points
             reward = -float(points)
@@ -408,7 +365,6 @@ cdef class GameEnvironment:
             self.scores[attacker.player] += points
             reward = float(points)
         
-        # 更新Bitboards
         self.piece_bitboards[attacker_player_idx][attacker_type_val] ^= (attacker_mask | defender_mask)
         self.revealed_bitboards[attacker_player_idx] ^= (attacker_mask | defender_mask)
         
@@ -420,7 +376,6 @@ cdef class GameEnvironment:
         
         self.empty_bitboard |= attacker_mask
         
-        # 更新棋盘对象和死亡列表
         self.dead_pieces[defender.player].append(defender)
         self.board[to_sq], self.board[from_sq] = attacker, None
         self.move_counter = 0
@@ -449,24 +404,22 @@ cdef class GameEnvironment:
         cdef int shifts[4]
         cdef bitboard wrap_checks[4]
 
-        # 1. 翻棋动作
         while temp_bb > 0:
             sq = pop_lsb(&temp_bb)
             if sq != -1:
                 action_mask[self.coords_to_action[SQ_TO_POS[sq]]] = 1
             
-        # 2. 普通棋子移动/攻击
-        for pt_val in range(NUM_PIECE_TYPES):  # 0到6，与Bitboard版本保持一致
+        for pt_val in range(NUM_PIECE_TYPES):
             cumulative_targets |= self.piece_bitboards[opponent_player_idx][pt_val]
             target_bbs[pt_val] = cumulative_targets
-        target_bbs[0] |= self.piece_bitboards[opponent_player_idx][6]  # SOLDIER gets GENERAL
-        target_bbs[6] &= ~self.piece_bitboards[opponent_player_idx][0]  # GENERAL excludes SOLDIER
+        target_bbs[0] |= self.piece_bitboards[opponent_player_idx][6]
+        target_bbs[6] &= ~self.piece_bitboards[opponent_player_idx][0]
 
         shifts[0] = -4; shifts[1] = 4; shifts[2] = -1; shifts[3] = 1
         wrap_checks[0] = 0; wrap_checks[1] = 0; wrap_checks[2] = NOT_FILE_A; wrap_checks[3] = NOT_FILE_H
 
         for pt_val in range(NUM_PIECE_TYPES):
-            if pt_val == 1: continue  # CANNON = 1
+            if pt_val == 1: continue
             from_sq_bb = self.piece_bitboards[my_player_idx][pt_val]
             if from_sq_bb == 0: continue
             
@@ -492,8 +445,7 @@ cdef class GameEnvironment:
                         action_index = self.coords_to_action.get((SQ_TO_POS[from_sq], SQ_TO_POS[to_sq]))
                         if action_index is not None: action_mask[action_index] = 1
 
-        # 3. 炮的攻击
-        my_cannons_bb = self.piece_bitboards[my_player_idx][1]  # CANNON = 1
+        my_cannons_bb = self.piece_bitboards[my_player_idx][1]
         if my_cannons_bb > 0:
             all_pieces_bb = ~self.empty_bitboard
             valid_cannon_targets = ~self.revealed_bitboards[my_player_idx]
@@ -501,17 +453,16 @@ cdef class GameEnvironment:
             temp_cannons_bb = my_cannons_bb
             while temp_cannons_bb > 0:
                 from_sq = pop_lsb(&temp_cannons_bb)
-                if from_sq == -1: 
-                    continue
+                if from_sq == -1: continue
                 
                 for direction_idx in range(4):
                     ray_bb = self.attack_tables['rays'][direction_idx][from_sq]
                     blockers = ray_bb & all_pieces_bb
                     if blockers == 0: continue
                     
-                    if direction_idx == 0 or direction_idx == 2: # North, West
+                    if direction_idx == 0 or direction_idx == 2:
                         screen_sq = msb_pos(blockers)
-                    else: # South, East
+                    else:
                         screen_sq = trailing_zeros(blockers)
                     
                     if screen_sq == -1: continue
@@ -532,9 +483,7 @@ cdef class GameEnvironment:
             
         return action_mask
 
-    # render 方法涉及大量字符串和终端颜色代码，不适合C级别优化，保持为普通Python方法
     def render(self):
-        """以人类可读的方式在终端打印当前棋盘状态。"""
         if self.render_mode != 'human': return
         red_map = {
             PieceType.GENERAL: "帥", PieceType.ADVISOR: "仕", PieceType.ELEPHANT: "相",
@@ -569,60 +518,52 @@ cdef class GameEnvironment:
     def close(self):
         pass
 
-    # === 为GUI访问添加的公共方法 ===
     def get_hidden_bitboard(self):
-        """获取隐藏棋子的bitboard"""
         return int(self.hidden_bitboard)
     
     def get_empty_bitboard(self):
-        """获取空位置的bitboard"""
         return int(self.empty_bitboard)
     
     def get_piece_bitboard(self, player, piece_type):
-        """获取指定玩家和棋子类型的bitboard"""
         cdef int player_idx = 1 if player == 1 else 0
         return int(self.piece_bitboards[player_idx][piece_type])
     
     def get_revealed_bitboard(self, player):
-        """获取指定玩家已翻开棋子的bitboard"""
         cdef int player_idx = 1 if player == 1 else 0
         return int(self.revealed_bitboards[player_idx])
-
-# 为了与 Gym 兼容，提供一个包装类
 
 # ==============================================================================
 # --- Gymnasium 兼容性包装器 ---
 # ==============================================================================
 
-class BanqiEnvironment(gym.Env):
-    """Gymnasium兼容性包装器，包装C级别的GameEnvironment"""
+class BanqiEnvironment(Wrapper):
+    """
+    Gymnasium兼容性包装器，现在继承自 gym.Wrapper 以便与 SubprocVecEnv 完美配合。
+    """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
     
     def __init__(self, render_mode=None):
-        super().__init__()
-        self._game = GameEnvironment(render_mode)
-        self.observation_space = self._game.observation_space
-        self.action_space = self._game.action_space
-        self.render_mode = render_mode
-    
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        return self._game.reset(seed, options)
-    
-    def step(self, action):
-        return self._game.step(action)
-    
-    def render(self):
-        return self._game.render()
-    
-    def close(self):
-        return self._game.close()
+        game_env = GameEnvironment(render_mode=render_mode)
+        super().__init__(game_env)
     
     def action_masks(self):
-        return self._game.action_masks()
+        return self.env.action_masks()
     
     def get_state(self):
-        return self._game.get_state()
+        return self.env.get_state()
+        
+    def get_wrapper_attr(self, name: str):
+        """
+        手动实现 get_wrapper_attr 以停止在非Gym环境的基类上进行递归。
+        这可以防止在 stable-baselines3 的 SubprocVecEnv 中出现AttributeError。
+        """
+        if hasattr(self, name):
+            return getattr(self, name)
+        elif hasattr(self.env, name):
+            return getattr(self.env, name)
+        else:
+            raise AttributeError(f"'{type(self).__name__}' and its base environment '{type(self.env).__name__}' do not have an attribute called '{name}'")
+
 
 # 为了向后兼容，保持原有的类名
 GameEnvironment_Wrapper = BanqiEnvironment
