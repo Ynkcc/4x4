@@ -11,19 +11,10 @@ from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtCore import Qt, QSize
 import numpy as np
 
-# 导入游戏环境 - 优先使用 Cython 版本，如果不可用则使用普通版本
-try:
-    from cython_version.Game_cython import GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ
-    print("使用 Cython 优化版本")
-    ACTION_SPACE_SIZE = 112  # Cython版本的动作空间大小
-    REVEAL_ACTIONS_COUNT = 16
-    REGULAR_MOVE_ACTIONS_COUNT = 48
-    MAX_CONSECUTIVE_MOVES = 40
-except ImportError:
-    from Game import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ, 
-                      ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
-                      MAX_CONSECUTIVE_MOVES)
-    print("使用普通 Python 版本")
+# 导入游戏环境
+from Game import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ, 
+                  ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
+                  MAX_CONSECUTIVE_MOVES)
 
 class BitboardGridWidget(QWidget):
     """一个专门用于可视化单个bitboard的4x4网格小部件。"""

@@ -1,4 +1,4 @@
-# Game_numpy.py - 基于Numpy向量的暗棋环境
+# Game.py - 基于Numpy向量的暗棋环境
 import random
 from enum import Enum
 import numpy as np
@@ -106,7 +106,6 @@ class GameEnvironment(gym.Env):
     def _initialize_lookup_tables(self):
         """预计算所有需要的查找表，构建统一动作空间。"""
         # 1. 炮的射线表 (用于action_masks)
-        # attack_tables['rays'][direction_idx][from_sq] -> 16-element bool vector
         ray_attacks = np.zeros((4, TOTAL_POSITIONS, TOTAL_POSITIONS), dtype=bool)
         for sq in range(TOTAL_POSITIONS):
             r, c = SQ_TO_POS[sq]
@@ -122,7 +121,7 @@ class GameEnvironment(gym.Env):
         
         # 2. 翻棋动作 (索引 0-15)
         for sq in range(TOTAL_POSITIONS):
-            pos = SQ_TO_POS[sq]
+            pos = tuple(SQ_TO_POS[sq]) # 确保是元组
             self.action_to_coords[action_idx] = pos
             self.coords_to_action[pos] = action_idx
             action_idx += 1
@@ -130,21 +129,59 @@ class GameEnvironment(gym.Env):
         # 3. 普通移动动作 (索引 16-63)
         for from_sq in range(TOTAL_POSITIONS):
             r, c = SQ_TO_POS[from_sq]
-            from_pos = (r, c)
-            if r > 0: to_sq = from_sq - 4; self.action_to_coords[action_idx] = (from_pos, SQ_TO_POS[to_sq]); self.coords_to_action[(from_pos, SQ_TO_POS[to_sq])] = action_idx; action_idx += 1
-            if r < 3: to_sq = from_sq + 4; self.action_to_coords[action_idx] = (from_pos, SQ_TO_POS[to_sq]); self.coords_to_action[(from_pos, SQ_TO_POS[to_sq])] = action_idx; action_idx += 1
-            if c > 0: to_sq = from_sq - 1; self.action_to_coords[action_idx] = (from_pos, SQ_TO_POS[to_sq]); self.coords_to_action[(from_pos, SQ_TO_POS[to_sq])] = action_idx; action_idx += 1
-            if c < 3: to_sq = from_sq + 1; self.action_to_coords[action_idx] = (from_pos, SQ_TO_POS[to_sq]); self.coords_to_action[(from_pos, SQ_TO_POS[to_sq])] = action_idx; action_idx += 1
+            from_pos = tuple((r, c)) # 确保是元组
+            # 上
+            if r > 0:
+                to_sq = from_sq - 4
+                to_pos = tuple(SQ_TO_POS[to_sq])
+                self.action_to_coords[action_idx] = (from_pos, to_pos)
+                self.coords_to_action[(from_pos, to_pos)] = action_idx
+                action_idx += 1
+            # 下
+            if r < 3:
+                to_sq = from_sq + 4
+                to_pos = tuple(SQ_TO_POS[to_sq])
+                self.action_to_coords[action_idx] = (from_pos, to_pos)
+                self.coords_to_action[(from_pos, to_pos)] = action_idx
+                action_idx += 1
+            # 左
+            if c > 0:
+                to_sq = from_sq - 1
+                to_pos = tuple(SQ_TO_POS[to_sq])
+                self.action_to_coords[action_idx] = (from_pos, to_pos)
+                self.coords_to_action[(from_pos, to_pos)] = action_idx
+                action_idx += 1
+            # 右
+            if c < 3:
+                to_sq = from_sq + 1
+                to_pos = tuple(SQ_TO_POS[to_sq])
+                self.action_to_coords[action_idx] = (from_pos, to_pos)
+                self.coords_to_action[(from_pos, to_pos)] = action_idx
+                action_idx += 1
 
         # 4. 炮的攻击动作 (索引 64-111)
         for r1 in range(BOARD_ROWS):
             for c1 in range(BOARD_COLS):
                 from_pos = (r1, c1)
-                for c2 in range(c1 + 2, BOARD_COLS): self.action_to_coords[action_idx] = (from_pos, (r1, c2)); self.coords_to_action[(from_pos, (r1, c2))] = action_idx; action_idx += 1
-                for c2 in range(c1 - 2, -1, -1): self.action_to_coords[action_idx] = (from_pos, (r1, c2)); self.coords_to_action[(from_pos, (r1, c2))] = action_idx; action_idx += 1
-                for r2 in range(r1 + 2, BOARD_ROWS): self.action_to_coords[action_idx] = (from_pos, (r2, c1)); self.coords_to_action[(from_pos, (r2, c1))] = action_idx; action_idx += 1
-                for r2 in range(r1 - 2, -1, -1): self.action_to_coords[action_idx] = (from_pos, (r2, c1)); self.coords_to_action[(from_pos, (r2, c1))] = action_idx; action_idx += 1
-
+                # 水平攻击
+                for c2 in range(BOARD_COLS):
+                    if abs(c1 - c2) > 1:
+                        to_pos = (r1, c2)
+                        key = (from_pos, to_pos)
+                        if key not in self.coords_to_action:
+                            self.action_to_coords[action_idx] = key
+                            self.coords_to_action[key] = action_idx
+                            action_idx += 1
+                # 垂直攻击
+                for r2 in range(BOARD_ROWS):
+                     if abs(r1 - r2) > 1:
+                        to_pos = (r2, c1)
+                        key = (from_pos, to_pos)
+                        if key not in self.coords_to_action:
+                            self.action_to_coords[action_idx] = key
+                            self.coords_to_action[key] = action_idx
+                            action_idx += 1
+                            
     def _initialize_board(self):
         """初始化棋盘和所有状态变量。"""
         pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
@@ -369,10 +406,14 @@ class GameEnvironment(gym.Env):
                     # 根据方向确定炮架和目标
                     if direction_idx == 0 or direction_idx == 2: # North, West (远端)
                         screen_sq = np.max(blockers_on_ray_indices)
-                        target_sq = np.max(blockers_on_ray_indices[blockers_on_ray_indices < screen_sq])
+                        target_candidates = blockers_on_ray_indices[blockers_on_ray_indices < screen_sq]
+                        if not target_candidates.size: continue
+                        target_sq = np.max(target_candidates)
                     else: # South, East (近端)
                         screen_sq = np.min(blockers_on_ray_indices)
-                        target_sq = np.min(blockers_on_ray_indices[blockers_on_ray_indices > screen_sq])
+                        target_candidates = blockers_on_ray_indices[blockers_on_ray_indices > screen_sq]
+                        if not target_candidates.size: continue
+                        target_sq = np.min(target_candidates)
 
                     if valid_cannon_targets[target_sq]:
                         from_pos, to_pos = SQ_TO_POS[from_sq], SQ_TO_POS[target_sq]
