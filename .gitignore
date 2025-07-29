@@ -26,3 +26,4 @@ banqi_ppo_logs/
 .vscode/
 Game_cython.cpp
 banqi_cython_ppo_logs
+banqi_numpy_ppo_logs
