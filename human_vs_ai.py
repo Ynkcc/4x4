@@ -1,4 +1,4 @@
-# human_vs_ai.py - 人机对战GUI版本
+# human_vs_ai.py - 人机对战GUI版本 (已增强界面并优化交互)
 import sys
 import os
 import time
@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt, QSize, QTimer
 import numpy as np
 
 # 导入游戏环境
-from Game import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ, 
+from Game import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
                   ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
                   MAX_CONSECUTIVE_MOVES)
 
@@ -25,7 +25,7 @@ try:
     print("AI模型支持已加载")
 except ImportError:
     AI_AVAILABLE = False
-    print("警告: 未找到AI模型库，只能进行人人对战")
+    print("警告: 未找到AI模型库(sb3_contrib)，只能进行人人对战")
 
 class BitboardGridWidget(QWidget):
     """一个专门用于可视化单个bitboard的4x4网格小部件。"""
@@ -45,7 +45,7 @@ class BitboardGridWidget(QWidget):
             self.labels.append(label)
             row, col = SQ_TO_POS[i]
             self.grid_layout.addWidget(label, row, col)
-        
+
         self.setLayout(self.grid_layout)
 
     def update_bitboard(self, bb_value: int):
@@ -61,17 +61,17 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.game = GameEnvironment()
-        
+
         # GUI 内部状态
         self.selected_from_sq = None
         self.valid_action_mask = np.zeros(ACTION_SPACE_SIZE, dtype=int)
-        
+
         # AI 相关状态
         self.ai_model = None
         self.ai_player = None  # None表示人人对战，1或-1表示AI控制的玩家
         self.ai_thinking = False
         self.game_over = False
-        
+
         # AI思考计时器
         self.ai_timer = QTimer()
         self.ai_timer.setSingleShot(True)
@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("暗棋 - 人机对战")
         self.setGeometry(100, 100, 1400, 900)
-        
+
         self.setup_ui()
         self.reset_game()
 
@@ -92,11 +92,11 @@ class MainWindow(QMainWindow):
         # --- 左侧面板：游戏控制 ---
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        
+
         # AI设置组
         ai_group = QGroupBox("AI 设置")
         ai_layout = QFormLayout()
-        
+
         # 游戏模式选择
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["人 vs 人", "人 vs AI (你是红方)", "人 vs AI (你是黑方)", "AI vs AI"])
@@ -104,53 +104,52 @@ class MainWindow(QMainWindow):
             self.mode_combo.setEnabled(False)
             self.mode_combo.setToolTip("需要安装 sb3-contrib 来启用AI功能")
         ai_layout.addRow("游戏模式:", self.mode_combo)
-        
+
         # AI模型路径
-        self.model_path_edit = QLineEdit("./banqi_numpy_ppo_logs/banqi_numpy_ppo_model.zip")
+        self.model_path_edit = QLineEdit("./banqi_numpy_ppo_logs/best_model/best_model.zip")
         self.model_path_edit.setPlaceholderText("输入AI模型文件路径")
         ai_layout.addRow("AI模型路径:", self.model_path_edit)
-        
+
         # 加载AI按钮
         self.load_ai_button = QPushButton("加载 AI 模型")
         self.load_ai_button.clicked.connect(self.load_ai_model)
         if not AI_AVAILABLE:
             self.load_ai_button.setEnabled(False)
         ai_layout.addRow(self.load_ai_button)
-        
+
         # AI状态显示
         self.ai_status_label = QLabel("AI状态: 未加载")
         ai_layout.addRow(self.ai_status_label)
-        
+
         # AI思考延迟
-        self.ai_delay_edit = QLineEdit("1000")
+        self.ai_delay_edit = QLineEdit("500")
         self.ai_delay_edit.setPlaceholderText("毫秒")
         ai_layout.addRow("AI思考延迟:", self.ai_delay_edit)
-        
+
         ai_group.setLayout(ai_layout)
-        
+
         # 游戏控制组
         control_group = QGroupBox("游戏控制")
         control_layout = QVBoxLayout()
-        
+
         self.new_game_button = QPushButton("开始新游戏")
         self.new_game_button.clicked.connect(self.new_game)
         control_layout.addWidget(self.new_game_button)
-        
+
         self.reset_button = QPushButton("重置当前游戏")
         self.reset_button.clicked.connect(self.reset_game)
         control_layout.addWidget(self.reset_button)
-        
+
         control_group.setLayout(control_layout)
-        
+
         # 游戏日志
         log_group = QGroupBox("游戏日志")
         log_layout = QVBoxLayout()
         self.log_text = QTextEdit()
-        self.log_text.setMaximumHeight(200)
         self.log_text.setReadOnly(True)
         log_layout.addWidget(self.log_text)
         log_group.setLayout(log_layout)
-        
+
         left_layout.addWidget(ai_group)
         left_layout.addWidget(control_group)
         left_layout.addWidget(log_group)
@@ -159,7 +158,7 @@ class MainWindow(QMainWindow):
         # --- 中间面板：棋盘 ---
         board_widget = QWidget()
         board_layout = QVBoxLayout(board_widget)
-        
+
         # 棋盘
         self.board_buttons = []
         board_group = QGroupBox("游戏棋盘")
@@ -177,13 +176,13 @@ class MainWindow(QMainWindow):
                 board_grid_layout.addWidget(button, r, c)
                 row_buttons.append(button)
             self.board_buttons.append(row_buttons)
-        
+
         board_group.setLayout(board_grid_layout)
-        
+
         # 游戏状态显示
         status_group = QGroupBox("游戏状态")
         status_layout = QFormLayout()
-        
+
         self.current_player_label = QLineEdit()
         self.current_player_label.setReadOnly(True)
         self.scores_label = QLineEdit()
@@ -192,21 +191,22 @@ class MainWindow(QMainWindow):
         self.move_counter_label.setReadOnly(True)
         self.game_status_label = QLineEdit()
         self.game_status_label.setReadOnly(True)
-        
+
         status_layout.addRow("当前玩家:", self.current_player_label)
         status_layout.addRow("得分 (红-黑):", self.scores_label)
         status_layout.addRow("连续未吃子:", self.move_counter_label)
         status_layout.addRow("游戏状态:", self.game_status_label)
-        
+
         status_group.setLayout(status_layout)
-        
+
         board_layout.addWidget(board_group)
         board_layout.addWidget(status_group)
+        board_layout.addStretch()
 
         # --- 右侧面板：详细状态 ---
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        
+
         # 阵亡棋子
         dead_group = QGroupBox("阵亡棋子")
         dead_layout = QFormLayout()
@@ -217,19 +217,53 @@ class MainWindow(QMainWindow):
         dead_layout.addRow("红方阵亡:", self.dead_pieces_red_label)
         dead_layout.addRow("黑方阵亡:", self.dead_pieces_black_label)
         dead_group.setLayout(dead_layout)
-        
-        # Bitboards 可视化 (简化版)
-        bitboard_group = QGroupBox("状态向量可视化")
-        bitboard_layout = QFormLayout()
-        
+
+        # === 新增: 详细的Bitboards可视化 ===
+        bitboard_group = QGroupBox("Bitboards 可视化")
+        bitboard_main_layout = QVBoxLayout()
+
+        # 通用 Bitboards
         self.hidden_bb_widget = BitboardGridWidget()
         self.empty_bb_widget = BitboardGridWidget()
+        bb_common_layout = QFormLayout()
+        bb_common_layout.addRow("Hidden Bitboard:", self.hidden_bb_widget)
+        bb_common_layout.addRow("Empty Bitboard:", self.empty_bb_widget)
+        bitboard_main_layout.addLayout(bb_common_layout)
+
+        # 分隔线
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        bitboard_main_layout.addWidget(line)
+
+        # 玩家相关的 Bitboards
+        player_bb_layout = QHBoxLayout()
         
-        bitboard_layout.addRow("暗棋位置:", self.hidden_bb_widget)
-        bitboard_layout.addRow("空位:", self.empty_bb_widget)
+        # 红方
+        red_bb_group = QGroupBox("红方 (Player 1) Bitboards")
+        self.red_bb_layout = QFormLayout()
+        red_bb_group.setLayout(self.red_bb_layout)
+        player_bb_layout.addWidget(red_bb_group)
         
-        bitboard_group.setLayout(bitboard_layout)
+        # 黑方
+        black_bb_group = QGroupBox("黑方 (Player -1) Bitboards")
+        self.black_bb_layout = QFormLayout()
+        black_bb_group.setLayout(self.black_bb_layout)
+        player_bb_layout.addWidget(black_bb_group)
         
+        self.player_bb_widgets = {1: {}, -1: {}}
+        for p, layout in [(1, self.red_bb_layout), (-1, self.black_bb_layout)]:
+            revealed_widget = BitboardGridWidget()
+            layout.addRow("Revealed BB:", revealed_widget)
+            self.player_bb_widgets[p]['revealed'] = revealed_widget
+            for pt in PieceType:
+                pt_widget = BitboardGridWidget()
+                layout.addRow(f"{pt.name} BB:", pt_widget)
+                self.player_bb_widgets[p][pt.value] = pt_widget
+
+        bitboard_main_layout.addLayout(player_bb_layout)
+        bitboard_group.setLayout(bitboard_main_layout)
+
         right_layout.addWidget(dead_group)
         right_layout.addWidget(bitboard_group)
         right_layout.addStretch()
@@ -238,19 +272,19 @@ class MainWindow(QMainWindow):
         main_splitter.addWidget(left_widget)
         main_splitter.addWidget(board_widget)
         main_splitter.addWidget(right_widget)
-        main_splitter.setSizes([300, 500, 300])
+        main_splitter.setSizes([350, 500, 550])
 
     def load_ai_model(self):
         """加载AI模型。"""
         if not AI_AVAILABLE:
-            self.log_message("错误: 未安装AI模型库")
+            self.log_message("错误: 未安装AI模型库 (pip install sb3-contrib)")
             return
-            
+
         model_path = self.model_path_edit.text().strip()
         if not model_path:
             self.log_message("错误: 请输入模型路径")
             return
-            
+
         try:
             self.ai_model = MaskablePPO.load(model_path)
             self.ai_status_label.setText("AI状态: 已加载")
@@ -262,11 +296,11 @@ class MainWindow(QMainWindow):
     def new_game(self):
         """开始新游戏，根据选择的模式设置AI。"""
         mode = self.mode_combo.currentText()
-        
+
         if "AI" in mode and self.ai_model is None:
             self.log_message("错误: 请先加载AI模型")
             return
-            
+
         # 设置AI玩家
         if mode == "人 vs 人":
             self.ai_player = None
@@ -276,9 +310,10 @@ class MainWindow(QMainWindow):
             self.ai_player = 1   # AI控制红方
         elif mode == "AI vs AI":
             self.ai_player = "both"  # AI控制双方
-        
+
+        self.log_message(f"--- 开始新游戏: {mode} ---")
         self.reset_game()
-        self.log_message(f"开始新游戏: {mode}")
+
 
     def reset_game(self):
         """重置游戏状态。"""
@@ -288,46 +323,51 @@ class MainWindow(QMainWindow):
         _, info = self.game.reset()
         self.valid_action_mask = info['action_mask']
         self.update_gui()
-        
+
         # 如果AI是红方且游戏刚开始，让AI先行
         if self.ai_player == 1 or self.ai_player == "both":
             self.schedule_ai_move()
 
     def on_board_click(self, pos):
-        """处理棋盘点击事件。"""
+        """处理棋盘点击事件 (已优化选择逻辑)。"""
         if self.game_over or self.ai_thinking:
             return
-            
+
         # 检查是否轮到人类玩家
         if self.ai_player == self.game.current_player or self.ai_player == "both":
             return
-            
+
         clicked_sq = POS_TO_SQ[pos]
-        
-        # 翻棋动作
+        piece_at_click = self.game.board[clicked_sq]
+
+        # --- 情况1: 未选择任何棋子 ---
         if self.selected_from_sq is None:
+            # 尝试执行翻棋动作
             action_index = self.game.coords_to_action.get(pos)
             if action_index is not None and action_index < REVEAL_ACTIONS_COUNT:
                 if self.valid_action_mask[action_index]:
                     self.make_move(action_index)
                     return
 
-        # 移动/攻击动作
-        if self.selected_from_sq is None:
-            # 选择棋子
-            piece = self.game.board[clicked_sq]
-            if piece and piece.revealed and piece.player == self.game.current_player:
+            # 如果点击的不是翻棋位置，则尝试选择一个己方棋子
+            if piece_at_click and piece_at_click.revealed and piece_at_click.player == self.game.current_player:
                 self.selected_from_sq = clicked_sq
                 self.update_gui()
+        
+        # --- 情况2: 已选择一个棋子 ---
         else:
-            # 移动棋子
             from_pos = tuple(SQ_TO_POS[self.selected_from_sq])
             to_pos = tuple(pos)
             
+            # 尝试执行移动/攻击
             action_index = self.game.coords_to_action.get((from_pos, to_pos))
-            
             if action_index is not None and self.valid_action_mask[action_index]:
                 self.make_move(action_index)
+            # [UX优化] 如果点击的是另一个自己的棋子，则切换选择
+            elif piece_at_click and piece_at_click.revealed and piece_at_click.player == self.game.current_player:
+                self.selected_from_sq = clicked_sq
+                self.update_gui()
+            # 否则，取消选择
             else:
                 self.selected_from_sq = None
                 self.update_gui()
@@ -336,32 +376,45 @@ class MainWindow(QMainWindow):
         """执行一步棋并更新状态。"""
         # 记录移动
         coords = self.game.action_to_coords.get(action_index)
+        move_desc = ""
+        piece_name = ""
+        
         if action_index < REVEAL_ACTIONS_COUNT:
-            move_desc = f"翻棋: {coords}"
+            move_desc = f"翻开了 ({coords[0]}, {coords[1]}) 位置的棋子"
         else:
-            move_desc = f"移动: {coords[0]} -> {coords[1]}"
+            from_sq = POS_TO_SQ[coords[0]]
+            to_sq = POS_TO_SQ[coords[1]]
+            attacker = self.game.board[from_sq]
+            defender = self.game.board[to_sq]
+            
+            attacker_name = attacker.piece_type.name
+            if defender is None:
+                move_desc = f"将 {attacker_name} 从 {coords[0]} 移动到 {coords[1]}"
+            else:
+                defender_name = defender.piece_type.name
+                move_desc = f"用 {attacker_name} 从 {coords[0]} 吃掉了 {coords[1]} 的 {defender_name}"
         
         player_name = "红方" if self.game.current_player == 1 else "黑方"
-        self.log_message(f"{player_name} {move_desc}")
-        
+        self.log_message(f"{player_name}: {move_desc}")
+
         # 执行移动
         state, reward, terminated, truncated, info = self.game.step(action_index)
         self.selected_from_sq = None
         self.valid_action_mask = info['action_mask']
-        
+
         # 检查游戏结束
         if terminated or truncated:
             self.game_over = True
             winner = info.get('winner', 0)
             if winner == 1:
-                self.log_message("游戏结束: 红方获胜!")
+                self.log_message("--- 游戏结束: 红方获胜! ---")
             elif winner == -1:
-                self.log_message("游戏结束: 黑方获胜!")
+                self.log_message("--- 游戏结束: 黑方获胜! ---")
             else:
-                self.log_message("游戏结束: 平局!")
-        
+                self.log_message("--- 游戏结束: 平局! ---")
+
         self.update_gui()
-        
+
         # 如果游戏没结束且轮到AI，安排AI移动
         if not self.game_over and (self.ai_player == self.game.current_player or self.ai_player == "both"):
             self.schedule_ai_move()
@@ -370,11 +423,12 @@ class MainWindow(QMainWindow):
         """安排AI移动。"""
         if self.ai_model is None:
             return
-            
-        delay = int(self.ai_delay_edit.text() or "1000")
+
+        delay = int(self.ai_delay_edit.text() or "500")
         self.ai_thinking = True
+        self.update_gui() # 立即更新UI以显示“思考中”
         self.ai_timer.start(delay)
-        
+
         player_name = "红方" if self.game.current_player == 1 else "黑方"
         self.log_message(f"{player_name} (AI) 正在思考...")
 
@@ -383,23 +437,27 @@ class MainWindow(QMainWindow):
         if self.ai_model is None or self.game_over:
             self.ai_thinking = False
             return
-            
+
         try:
             state = self.game.get_state()
             action_mask = self.valid_action_mask.astype(bool)
-            
+
             if not np.any(action_mask):
-                self.log_message("AI无法移动")
+                self.log_message("AI发现无棋可走")
                 self.ai_thinking = False
+                # 在这种情况下，游戏逻辑应该已经判定了输赢，这里只是UI侧的日志
                 return
-                
+
             action, _ = self.ai_model.predict(state, action_masks=action_mask, deterministic=True)
             self.make_move(int(action))
-            
+
         except Exception as e:
             self.log_message(f"AI移动出错: {str(e)}")
         finally:
             self.ai_thinking = False
+            # 再次更新GUI以消除“思考中”状态
+            self.update_gui()
+
 
     def log_message(self, message):
         """添加日志消息。"""
@@ -415,7 +473,7 @@ class MainWindow(QMainWindow):
         self.update_bitboard_display()
 
     def update_board_display(self):
-        """更新棋盘显示。"""
+        """更新棋盘显示 (已优化高亮逻辑)。"""
         red_map = {
             PieceType.GENERAL: "帥", PieceType.ADVISOR: "仕", PieceType.ELEPHANT: "相",
             PieceType.CHARIOT: "俥", PieceType.HORSE: "傌", PieceType.CANNON: "炮", PieceType.SOLDIER: "兵"
@@ -429,8 +487,9 @@ class MainWindow(QMainWindow):
         reveal_targets = set()
         normal_move_targets = set()
         cannon_attack_targets = set()
+        movable_pieces_pos = set()
 
-        is_human_turn = (not self.ai_thinking and not self.game_over and 
+        is_human_turn = (not self.ai_thinking and not self.game_over and
                          self.ai_player != self.game.current_player and self.ai_player != "both")
 
         if is_human_turn:
@@ -442,28 +501,25 @@ class MainWindow(QMainWindow):
 
                 for action_index, is_valid in enumerate(self.valid_action_mask):
                     if not is_valid: continue
-                    
                     coords = self.game.action_to_coords.get(action_index)
-                    if coords is None: continue
-
-                    # 检查是否是移动/攻击动作 ((r1,c1), (r2,c2))
-                    if isinstance(coords, tuple) and len(coords) == 2 and isinstance(coords[0], tuple):
-                        from_pos_action = tuple(coords[0])
-                        if from_pos_action == from_pos_selected:
+                    if coords and isinstance(coords, tuple) and len(coords) == 2 and isinstance(coords[0], tuple):
+                        if tuple(coords[0]) == from_pos_selected:
                             target_pos = tuple(coords[1])
-                            # 根据动作索引判断是否为炮的攻击
                             if is_cannon and action_index >= (REVEAL_ACTIONS_COUNT + REGULAR_MOVE_ACTIONS_COUNT):
                                 cannon_attack_targets.add(target_pos)
                             else:
                                 normal_move_targets.add(target_pos)
             else:
-                # --- 未选择棋子：高亮可翻开的棋子 ---
-                for action_index in range(REVEAL_ACTIONS_COUNT):
-                    if self.valid_action_mask[action_index]:
-                        coords = self.game.action_to_coords.get(action_index)
-                        # 检查是否是翻棋动作 (r,c)
-                        if isinstance(coords, tuple) and len(coords) == 2 and isinstance(coords[0], int):
-                            reveal_targets.add(coords)
+                # --- 未选择棋子：高亮可翻开的棋子和可移动的棋子 ---
+                for action_index, is_valid in enumerate(self.valid_action_mask):
+                    if not is_valid: continue
+                    coords = self.game.action_to_coords.get(action_index)
+                    if not coords: continue
+
+                    if action_index < REVEAL_ACTIONS_COUNT:
+                        reveal_targets.add(coords)
+                    else: # 移动或攻击动作
+                        movable_pieces_pos.add(tuple(coords[0]))
 
 
         # 更新按钮显示
@@ -473,28 +529,33 @@ class MainWindow(QMainWindow):
                 pos = (r, c)
                 button = self.board_buttons[r][c]
                 piece = self.game.board[sq]
-                
+
                 # 基础样式
                 stylesheet = "QPushButton { border: 2px solid #AAAAAA; }"
                 
-                # 禁用状态
                 button.setEnabled(is_human_turn)
-                
                 if not is_human_turn:
                     stylesheet += "QPushButton { background-color: #F0F0F0; }"
-                elif pos in cannon_attack_targets:
-                    stylesheet += "QPushButton { background-color: #FFC0CB; }" # 粉色
-                elif pos in normal_move_targets:
-                    stylesheet += "QPushButton { background-color: #90EE90; }" # 浅绿
-                elif pos in reveal_targets:
-                     stylesheet += "QPushButton { background-color: #ADD8E6; }" # 浅蓝
                 
+                # --- 应用高亮样式 (顺序很重要) ---
+                # 1. 目标位置高亮
+                if pos in cannon_attack_targets:
+                    stylesheet += "QPushButton { background-color: #FFC0CB; }" # 粉色 (炮攻击)
+                elif pos in normal_move_targets:
+                    stylesheet += "QPushButton { background-color: #90EE90; }" # 浅绿 (普通移动)
+                elif pos in reveal_targets:
+                    stylesheet += "QPushButton { background-color: #ADD8E6; }" # 浅蓝 (翻棋)
+                # 2. 可选棋子高亮 (如果未选择棋子)
+                elif pos in movable_pieces_pos:
+                     stylesheet += "QPushButton { background-color: #FFFFE0; }" # 淡黄 (可选)
+
+                # 3. 选中的棋子边框 (最高优先级)
                 if self.selected_from_sq == sq:
                     stylesheet += "QPushButton { border-color: #0078D7; border-width: 4px; }"
-                
+
                 button.setStyleSheet(stylesheet)
-                
-                # 设置文本
+
+                # 设置文本和颜色
                 if piece is None:
                     button.setText("")
                 elif not piece.revealed:
@@ -510,12 +571,15 @@ class MainWindow(QMainWindow):
     def update_status_display(self):
         """更新状态显示。"""
         # 当前玩家
-        player_str = "红方" if self.game.current_player == 1 else "黑方"
-        if self.ai_player == self.game.current_player:
-            player_str += " (AI)"
-        elif self.ai_player == "both":
-            player_str += " (AI)"
-        self.current_player_label.setText(player_str)
+        player_name = "红方" if self.game.current_player == 1 else "黑方"
+        player_role = ""
+        if self.ai_player is not None:
+             if self.ai_player == self.game.current_player or self.ai_player == "both":
+                 player_role = " (AI)"
+             else:
+                 player_role = " (你)"
+        
+        self.current_player_label.setText(f"{player_name}{player_role}")
         
         # 分数
         scores = self.game.scores
@@ -539,16 +603,26 @@ class MainWindow(QMainWindow):
         self.dead_pieces_black_label.setText(dead_black_str if dead_black_str else "无")
 
     def update_bitboard_display(self):
-        """更新bitboard显示。"""
+        """更新所有Bitboard的可视化网格。"""
         def vector_to_bitboard(vector):
             result = 0
-            for i in range(len(vector)):
-                if vector[i]:
-                    result |= (1 << i)
-            return result
-        
+            # 使用 numpy 的方式来加速转换
+            powers_of_2 = 1 << np.arange(len(vector))
+            result = np.sum(powers_of_2[vector])
+            return int(result)
+
+        # 更新基础状态向量
         self.hidden_bb_widget.update_bitboard(vector_to_bitboard(self.game.hidden_vector))
         self.empty_bb_widget.update_bitboard(vector_to_bitboard(self.game.empty_vector))
+
+        # 更新玩家相关的向量
+        for p in [1, -1]:
+            self.player_bb_widgets[p]['revealed'].update_bitboard(
+                vector_to_bitboard(self.game.revealed_vectors[p])
+            )
+            for pt in PieceType:
+                bb_val = vector_to_bitboard(self.game.piece_vectors[p][pt.value])
+                self.player_bb_widgets[p][pt.value].update_bitboard(bb_val)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

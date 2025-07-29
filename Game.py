@@ -1,4 +1,4 @@
-# Game.py - 基于Numpy向量的暗棋环境
+# Game.py - 基于Numpy向量的暗棋环境 (已加入最终奖惩)
 import random
 from enum import Enum
 import numpy as np
@@ -243,41 +243,61 @@ class GameEnvironment(gym.Env):
         
         return state
 
+    # === 修改: step函数被重构以加入最终奖惩 ===
     def step(self, action_index):
+        # 记录下做出动作的玩家，以便在最后正确地分配奖惩
+        acting_player = self.current_player
+
         reward = -0.0005  # 时间惩罚
         coords = self.action_to_coords.get(action_index)
         if coords is None:
             raise ValueError(f"无效的动作索引: {action_index}")
 
-        # 判断是翻棋还是移动
+        # 应用动作并计算即时奖励
         if action_index < REVEAL_ACTIONS_COUNT:
             from_sq = POS_TO_SQ[coords]
             self._apply_reveal_update(from_sq)
             self.move_counter = 0
-            reward += 0.0005
+            reward += 0.0005 # 翻棋抵消时间惩罚
         else:
             from_sq = POS_TO_SQ[coords[0]]
             to_sq = POS_TO_SQ[coords[1]]
             raw_reward = self._apply_move_action(from_sq, to_sq)
+            # 将吃子得分归一化，避免其与最终胜负奖励差距过大
             reward += raw_reward / WINNING_SCORE if WINNING_SCORE > 0 else raw_reward
         
-        # 检查游戏结束条件
+        # --- 检查游戏结束条件 ---
         terminated, truncated, winner = False, False, None
+        
+        # 1. 检查得分胜利
         if self.scores[1] >= WINNING_SCORE:
             winner, terminated = 1, True
         elif self.scores[-1] >= WINNING_SCORE:
             winner, terminated = -1, True
-        elif self.move_counter >= MAX_CONSECUTIVE_MOVES:
-            winner, truncated = 0, True
-
+        
+        # 切换玩家，为下一步做准备
         self.current_player = -self.current_player
         
-        # 检查新玩家是否有棋可走
+        # 2. 检查新玩家是否无棋可走 (在切换玩家后检查)
         action_mask = self.action_masks()
         if not terminated and not truncated and np.sum(action_mask) == 0:
-            winner = -self.current_player
+            winner = acting_player # 做出最后一步的玩家(acting_player)获胜
             terminated = True
-            
+
+        # 3. 检查是否平局 (在所有胜利条件之后检查)
+        if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES:
+            winner, truncated = 0, True
+
+        # --- 新增: 基于最终结果，修正 acting_player 的奖励 ---
+        if terminated:
+            if winner == acting_player:
+                reward += 1.0  # 胜利，给予巨大正奖励
+            elif winner == -acting_player:
+                reward -= 1.0  # 失败，给予巨大负奖励
+        elif truncated: # 平局
+            reward -= 0.5 # 平局给予一个负奖励，鼓励分出胜负
+
+        # 准备返回信息
         info = {'winner': winner, 'action_mask': action_mask}
         if (terminated or truncated) and self.render_mode == "human":
             self.render()
