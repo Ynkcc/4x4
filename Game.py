@@ -258,7 +258,7 @@ class GameEnvironment(gym.Env):
             from_sq = POS_TO_SQ[coords]
             self._apply_reveal_update(from_sq)
             self.move_counter = 0
-            reward += 0.0005 # 翻棋抵消时间惩罚
+            # reward += 0.0005 # 翻棋抵消时间惩罚，因模型出现开局一直翻棋的现象，故注释掉
         else:
             from_sq = POS_TO_SQ[coords[0]]
             to_sq = POS_TO_SQ[coords[1]]

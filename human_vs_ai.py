@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("游戏模式:", self.mode_combo)
 
         # AI模型路径
-        self.model_path_edit = QLineEdit("./banqi_numpy_ppo_logs/best_model/best_model.zip")
+        self.model_path_edit = QLineEdit("./banqi_ppo_logs/best_model/best_model.zip")
         self.model_path_edit.setPlaceholderText("输入AI模型文件路径")
         ai_layout.addRow("AI模型路径:", self.model_path_edit)
 
@@ -320,7 +320,7 @@ class MainWindow(QMainWindow):
         self.selected_from_sq = None
         self.ai_thinking = False
         self.game_over = False
-        _, info = self.game.reset()
+        _, info = self.game.reset(seed=42)
         self.valid_action_mask = info['action_mask']
         self.update_gui()
 
