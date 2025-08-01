@@ -33,47 +33,45 @@ class ProgressCallback(BaseCallback):
         self.initial_timesteps = self.model.num_timesteps
     
     def _on_step(self) -> bool:
-        if len(self.locals.get('rewards', [])) > 0:
-            for reward in self.locals['rewards']:
-                self.episode_rewards.append(reward)
-        
-        if self.num_timesteps % 500 == 0:
+        # self.num_timesteps 是当前 learn() 调用中的步数
+        # self.model.num_timesteps 是模型的总步数
+        if self.model.num_timesteps % 500 == 0:
             elapsed_time = time.time() - self.start_time
+            # 确保在计算平均奖励之前，episode_rewards 不为空
+            if self.locals.get("infos"):
+                for info in self.locals["infos"]:
+                    if "episode" in info:
+                        self.episode_rewards.append(info["episode"]["r"])
+
             if len(self.episode_rewards) > 0:
+                # 计算最近100个 episode 的平均奖励
                 avg_reward = np.mean(self.episode_rewards[-100:])
-                absolute_steps = self.initial_timesteps + self.num_timesteps
-                print(f"Absolute Steps: {absolute_steps:,} | "
+                print(f"Absolute Steps: {self.model.num_timesteps:,} | "
                       f"Session Steps: {self.num_timesteps:,} | "
                       f"Avg Reward (last 100): {avg_reward:.6f} | "
                       f"Time: {elapsed_time:.1f}s")
         
         return True
 
-# --- 修改: make_env 工厂函数，使其只使用一个固定的基础种子 ---
-def make_env(seed: int = 0):
+# --- 修改: make_env 工厂函数，不再固定种子 ---
+def make_env():
     """
     创建单个环境实例的工厂函数。
-    :param seed: 基础种子。
     """
     def _init():
-        # 为每个环境设置完全相同的种子
+        # 每个环境都将随机初始化
         env = GameEnvironment()
-        env.reset(seed=seed)
+        # 注意：我们在这里不调用 reset，因为 VecEnv 会自动为我们处理
         return env
     return _init
 
 def main():
     """
     训练函数。
-    修改为：所有环境开局相同，但模型动作具有随机性。
     """
-    # --- 新增: 仅为环境设定种子 ---
-    # 这个种子将用于所有并行环境，以确保它们的开局完全一致
-    env_seed = 42
-
     # --- 训练参数 ---
     total_timesteps = 15_000_000
-    n_envs = 6
+    n_envs = 11
     learning_rate = 4e-4
     batch_size = 64
     n_steps = 2048
@@ -85,21 +83,21 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     
     # --- 创建环境 ---
-    print(f"创建 {n_envs} 个并行环境，所有环境开局将保持一致...")
+    print(f"创建 {n_envs} 个并行环境，所有环境将随机初始化...")
     
-    # 修改: 所有环境都使用同一个`make_env(seed=env_seed)`
-    env = SubprocVecEnv([make_env(seed=env_seed) for _ in range(n_envs)])
+    # 修改: 所有环境都将随机初始化
+    env = SubprocVecEnv([make_env() for _ in range(n_envs)])
     
     # 创建评估环境
     eval_env = GameEnvironment()
-    # 为评估环境也设定相同的种子，确保评估的起点一致
-    eval_env.reset(seed=env_seed)
+    # 为评估环境也设定随机种子
+    eval_env.reset()
 
     # --- 回调函数设置 ---
     progress_callback = ProgressCallback(verbose=1)
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(10000 // n_envs, 1),
+        save_freq=max(40000 // n_envs, 1),
         save_path=log_dir,
         name_prefix="rl_model_fixed_start",
         save_replay_buffer=False,
@@ -110,7 +108,7 @@ def main():
         eval_env,
         best_model_save_path=best_model_save_path,
         log_path=log_dir,
-        eval_freq=max(15000 // n_envs, 1),
+        eval_freq=max(25000 // n_envs, 1),
         n_eval_episodes=20,
         deterministic=True,
         render=False
@@ -126,9 +124,11 @@ def main():
             env=env,
             tensorboard_log=log_dir
         )
+        model.ent_coef = 0.01  # 增加探索
         model.lr_schedule = lambda _: learning_rate
         print(f"模型已加载，当前训练步数: {model.num_timesteps}")
         print(f"学习率已调整为: {learning_rate}")
+        print(f"熵系数已调整为: {model.ent_coef}")
     else:
         print("未找到已存在的模型，将创建新模型...")
         # 修改: 不再为模型设置seed，以允许动作的随机性
@@ -138,7 +138,7 @@ def main():
             verbose=1,
             gamma=0.995,
             n_steps=n_steps,
-            ent_coef=0.005,
+            ent_coef=0.01, # 增加探索
             learning_rate=learning_rate,
             batch_size=batch_size,
             n_epochs=10,

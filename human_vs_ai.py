@@ -320,7 +320,7 @@ class MainWindow(QMainWindow):
         self.selected_from_sq = None
         self.ai_thinking = False
         self.game_over = False
-        _, info = self.game.reset(seed=42)
+        _, info = self.game.reset()
         self.valid_action_mask = info['action_mask']
         self.update_gui()
 
