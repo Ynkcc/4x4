@@ -13,10 +13,10 @@ from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtCore import Qt, QSize, QTimer
 import numpy as np
 
-# 导入游戏环境
-from Game import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
-                  ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
-                  MAX_CONSECUTIVE_MOVES)
+# 【修复】导入游戏环境的路径
+from game.environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
+                              ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
+                              MAX_CONSECUTIVE_MOVES)
 
 # 导入AI模型
 try:

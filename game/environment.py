@@ -252,7 +252,9 @@ class GameEnvironment(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._initialize_board()
-        return self.get_state(), {'action_mask': self.action_masks()}
+        # 在info中增加一个'winner'键以保持与step返回格式一致
+        info = {'action_mask': self.action_masks(), 'winner': None}
+        return self.get_state(), info
     
     def get_state(self):
         """
@@ -324,19 +326,25 @@ class GameEnvironment(gym.Env):
 
     def _internal_apply_action(self, action_index):
         """
-        内部方法：应用动作并返回奖励、terminated、truncated状态
+        内部方法：应用动作并返回奖励、terminated、truncated状态和赢家
         这个方法被 step 和自我对弈逻辑共同使用
         """
         coords = self.action_to_coords.get(action_index)
         if coords is None:
+            # 这个警告不应该在正常训练中出现，因为模型受action_mask限制
+            # 但在调试或非预期输入时可能有用
             print(f"警告：无效的动作索引: {action_index}")
-            return -1.0, False, True  # 惩罚无效动作
+            return -1.0, False, True, None  # 惩罚无效动作
             
         # 检查动作有效性
         action_mask = self.action_masks()
         if not action_mask[action_index]:
             print(f"警告：试图执行无效动作: {action_index}, coords: {coords}")
-            return -1.0, False, True  # 惩罚无效动作
+            # 返回截断状态，强制环境重置
+            return -1.0, False, True, None
+        
+        # winner在游戏结束时被赋值
+        winner = None
 
         # 阶段 1 & 2: 目标驱动的短期对局
         if self.curriculum_stage in [1, 2]:
@@ -351,6 +359,7 @@ class GameEnvironment(gym.Env):
                 if self.board[to_sq] is not None and self.board[to_sq].player == -self.current_player:
                     reward = 1.0
                     terminated = True
+                    winner = self.current_player
                     self._apply_move_action(from_sq, to_sq)
                 else:
                     self._apply_move_action(from_sq, to_sq)
@@ -358,8 +367,9 @@ class GameEnvironment(gym.Env):
             if not terminated and self.move_counter >= 5:
                 truncated = True
                 reward = -1.0
+                winner = 0 # 平局
 
-            return reward, terminated, truncated
+            return reward, terminated, truncated, winner
 
         # 完整游戏逻辑
         reward = -0.0005
@@ -374,24 +384,27 @@ class GameEnvironment(gym.Env):
             raw_reward = self._apply_move_action(from_sq, to_sq)
             reward += raw_reward / WINNING_SCORE if WINNING_SCORE > 0 else raw_reward
         
-        terminated, truncated, winner = False, False, None
+        terminated, truncated = False, False
         
         if self.scores[1] >= WINNING_SCORE:
             winner, terminated = 1, True
         elif self.scores[-1] >= WINNING_SCORE:
             winner, terminated = -1, True
         
-        # 检查是否有合法动作
-        temp_current_player = self.current_player
-        self.current_player = -self.current_player  # 临时切换以检查对手的动作
-        action_mask = self.action_masks()
-        self.current_player = temp_current_player  # 切换回来
+        # 检查对手是否有合法动作
+        # 临时切换玩家以检查对手的动作
+        self.current_player = -self.current_player
+        opponent_action_mask = self.action_masks()
+        # 切换回来
+        self.current_player = -self.current_player
         
-        if not terminated and not truncated and np.sum(action_mask) == 0:
+        if not terminated and not truncated and np.sum(opponent_action_mask) == 0:
+            # 如果对手无棋可走，当前玩家获胜
             winner = self.current_player
             terminated = True
 
         if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES:
+            # 达到最大步数，平局
             winner, truncated = 0, True
 
         if terminated:
@@ -400,91 +413,75 @@ class GameEnvironment(gym.Env):
             elif winner == -self.current_player:
                 reward -= 1.0
         elif truncated:
+            # 平局惩罚
             reward -= 0.5
 
-        return reward, terminated, truncated
+        return reward, terminated, truncated, winner
 
-    def step(self, action_index):
-        acting_player = self.current_player
+    # 【修复】移除了重复的 step 方法定义
     def step(self, action_index):
         acting_player = self.current_player
         
         # 应用学习者的动作
-        reward, terminated, truncated = self._internal_apply_action(action_index)
+        reward, terminated, truncated, winner = self._internal_apply_action(action_index)
         
-        # 阶段 1 & 2: 目标驱动的短期对局 (保持原有逻辑)
-        if self.curriculum_stage in [1, 2]:
-            self.current_player = -self.current_player
-            info = {'winner': acting_player if terminated else None, 'action_mask': self.action_masks()}
+        # 如果游戏因此动作结束，则直接返回
+        if terminated or truncated:
+            info = {'winner': winner, 'action_mask': self.action_masks()}
             return self.get_state(), np.float32(reward), terminated, truncated, info
 
         # 切换玩家
         self.current_player = -self.current_player
 
         # 自我对弈逻辑：如果是对手的回合并且游戏未结束
-        while (self.current_player != self.learning_player_id and 
-               self.opponent_model is not None and not terminated and not truncated):
+        if (self.current_player != self.learning_player_id and 
+            self.opponent_model is not None):
 
             # 1. 对手观察当前状态
             opponent_obs = self.get_state()
             opponent_mask = self.action_masks()
 
+            # 如果对手没有合法动作，游戏应该在上面已经结束了，但作为安全检查
+            if np.sum(opponent_mask) == 0:
+                # 这种情况理论上不应发生，因为_internal_apply_action已检查
+                # 但如果发生，则对手输，学习者赢
+                winner = self.learning_player_id
+                terminated = True
+                info = {'winner': winner, 'action_mask': opponent_mask}
+                return self.get_state(), np.float32(reward + 1.0), terminated, truncated, info
+
             # 2. 对手决策
             try:
                 if self.use_shared_manager:
-                    # 使用共享管理器进行预测
                     from training.manager import shared_opponent_manager
                     opponent_action = shared_opponent_manager.predict_single(
                         opponent_obs, opponent_mask, deterministic=True
                     )
                     if opponent_action is None:
-                        raise Exception("共享管理器预测返回None")
+                        raise ValueError("共享管理器预测返回None")
                 else:
-                    # 传统方式预测
                     opponent_action, _ = self.opponent_model.predict(
                         opponent_obs, action_masks=opponent_mask, deterministic=True
                     )
-                    opponent_action = int(opponent_action)
+                opponent_action = int(opponent_action)
             except Exception as e:
-                print(f"警告：对手模型预测失败: {e}")
-                # 如果预测失败，随机选择一个合法动作
+                print(f"警告：对手模型预测失败: {e}。将随机选择一个有效动作。")
                 valid_actions = np.where(opponent_mask)[0]
-                if len(valid_actions) > 0:
-                    opponent_action = np.random.choice(valid_actions)
-                else:
-                    break  # 没有合法动作，跳出循环
+                opponent_action = np.random.choice(valid_actions)
 
             # 3. 对手执行动作
-            try:
-                opponent_reward, term, trunc = self._internal_apply_action(opponent_action)
-                
-                # 4. 累加奖励并更新结束标志
-                reward += opponent_reward
-                terminated = terminated or term
-                truncated = truncated or trunc
+            opponent_reward, terminated, truncated, winner = self._internal_apply_action(opponent_action)
+            
+            # 4. 累加奖励 (注意：奖励是从学习者的角度计算的)
+            # 对手的奖励对学习者来说是负的
+            reward -= opponent_reward
 
-                # 5. 如果游戏未结束，切换回学习者
-                if not terminated and not truncated:
-                    self.current_player = -self.current_player
-                else:
-                    break  # 游戏已结束，跳出循环
-            except Exception as e:
-                print(f"警告：对手动作执行失败: {e}")
-                break
+            # 5. 如果游戏未结束，切换回学习者
+            if not terminated and not truncated:
+                self.current_player = -self.current_player
 
-        # 生成最终的动作掩码
-        action_mask = self.action_masks()
-        
-        # 如果游戏未结束但没有合法动作，设置游戏结束
-        if not terminated and not truncated and np.sum(action_mask) == 0:
-            winner = acting_player
-            terminated = True
-            if winner == acting_player:
-                reward += 1.0
-            elif winner == -acting_player:
-                reward -= 1.0
-
-        info = {'winner': acting_player if terminated else None, 'action_mask': action_mask}
+        # 最终信息包
+        info = {'winner': winner, 'action_mask': self.action_masks()}
         if (terminated or truncated) and self.render_mode == "human":
             self.render()
 
@@ -494,14 +491,9 @@ class GameEnvironment(gym.Env):
         """应用翻棋动作并更新状态向量。"""
         piece = self.board[from_sq]
         
-        # 安全检查：确保位置有棋子
-        if piece is None:
-            print(f"警告：试图翻开空位置 {from_sq} 的棋子")
-            return
-            
-        # 安全检查：确保棋子未被翻开
-        if piece.revealed:
-            print(f"警告：试图翻开已经翻开的棋子 at {from_sq}")
+        if piece is None or piece.revealed:
+            # 这种检查主要用于调试，理论上不应被合法动作触发
+            print(f"警告：试图翻开空或已翻开的位置 {from_sq}")
             return
             
         piece.revealed = True
@@ -514,14 +506,8 @@ class GameEnvironment(gym.Env):
         attacker = self.board[from_sq]
         defender = self.board[to_sq]
         
-        # 安全检查：确保攻击者存在
-        if attacker is None:
-            print(f"警告：试图从空位置 {from_sq} 移动棋子")
-            return 0.0
-            
-        # 安全检查：确保攻击者已被翻开
-        if not attacker.revealed:
-            print(f"警告：试图移动未翻开的棋子 at {from_sq}")
+        if attacker is None or not attacker.revealed:
+            print(f"警告：试图从 {from_sq} 移动空或未翻开的棋子")
             return 0.0
         
         reward = 0.0
@@ -542,6 +528,7 @@ class GameEnvironment(gym.Env):
         points = PIECE_VALUES[defender.piece_type]
         is_cannon_attack = attacker.piece_type == PieceType.CANNON
         
+        # 注意：此处规则不标准，如自杀加对方分。按原逻辑实现。
         if is_cannon_attack and attacker.player == defender.player:
             self.scores[-attacker.player] += points
             reward = -float(points)

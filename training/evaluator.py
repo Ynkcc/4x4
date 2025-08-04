@@ -52,26 +52,19 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
         games_played = 0
         
         obs = eval_env.reset()
-        # 初始化时没有动作掩码，需要执行一步或使用默认掩码
-        current_action_masks = None
+        # 【修复】从环境中获取初始的动作掩码
+        # 注意：reset() 之后的 infos 需要通过 get_attr('info') 来获取
+        action_masks = np.array([info.get('action_mask') for info in eval_env.get_attr('info')])
         
         while games_played < EVALUATION_GAMES:
-            # 挑战者模型根据观察进行确定性预测
-            if current_action_masks is not None:
-                action, _ = challenger_model.predict(obs, action_masks=current_action_masks, deterministic=True)
-            else:
-                action, _ = challenger_model.predict(obs, deterministic=True)
+            # 【修复】确保总是传入有效的动作掩码
+            action, _ = challenger_model.predict(obs, action_masks=action_masks, deterministic=True)
             
-            # 环境执行动作
+            # 【修复】移除重复的 step 调用，这是导致无效动作的核心bug
             obs, rewards, dones, infos = eval_env.step(action)
             
-            # 提取动作掩码供下一步使用
-            current_action_masks = [info.get('action_mask') for info in infos if 'action_mask' in info]
-            if len(current_action_masks) == 0:
-                current_action_masks = None
-            
-            # 环境执行动作
-            obs, rewards, dones, infos = eval_env.step(action)
+            # 从返回的infos中为下一步提取新的动作掩码
+            action_masks = np.array([info.get('action_mask') for info in infos])
             
             for i, done in enumerate(dones):
                 # 如果当前环境中的一局游戏结束
@@ -89,12 +82,13 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
                     if games_played >= EVALUATION_GAMES:
                         break
         
-        # 计算胜率
-        win_rate = wins / games_played if games_played > 0 else 0.0
+        # 【修复】修正胜率计算逻辑，平局不计入胜率计算
+        total_games_for_winrate = wins + losses
+        win_rate = wins / total_games_for_winrate if total_games_for_winrate > 0 else 0.0
         
         print(f"--- 评估结束: 共进行了 {games_played} 局游戏 ---")
         print(f"    挑战者战绩: {wins}胜 / {losses}负 / {draws}平")
-        print(f"    挑战者胜率: {win_rate:.2%}")
+        print(f"    挑战者胜率 (胜 / (胜+负)): {win_rate:.2%}")
         
         return win_rate
 
