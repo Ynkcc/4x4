@@ -1,4 +1,5 @@
 # Game.py - 基于Numpy向量的暗棋环境 (已修改以支持CNN)
+import os
 import random
 from enum import Enum
 import numpy as np
@@ -59,10 +60,24 @@ class GameEnvironment(gym.Env):
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    def __init__(self, render_mode=None, curriculum_stage=4):
+    def __init__(self, render_mode=None, curriculum_stage=4, opponent_policy=None):
         super().__init__()
         self.render_mode = render_mode
         self.curriculum_stage = curriculum_stage
+        
+        # 自我对弈相关属性
+        self.learning_player_id = 1  # 学习者始终是玩家1（红方）
+        self.opponent_model = None
+        
+        # 如果提供了对手策略路径，则加载对手模型
+        if opponent_policy and os.path.exists(opponent_policy):
+            print(f"环境加载对手策略: {opponent_policy}")
+            try:
+                from sb3_contrib import MaskablePPO
+                self.opponent_model = MaskablePPO.load(opponent_policy)
+            except Exception as e:
+                print(f"警告：无法加载对手模型 {opponent_policy}: {e}")
+                self.opponent_model = None
 
         # --- 【重要修改】状态空间定义 ---
         # 状态被分为两部分：棋盘的“图像”表示和全局的“标量”特征
@@ -292,13 +307,16 @@ class GameEnvironment(gym.Env):
         # 3. 组合成字典返回
         return {"board": board_state, "scalars": scalar_state}
 
-    def step(self, action_index):
-        acting_player = self.current_player
+    def _internal_apply_action(self, action_index):
+        """
+        内部方法：应用动作并返回奖励、terminated、truncated状态
+        这个方法被 step 和自我对弈逻辑共同使用
+        """
         coords = self.action_to_coords.get(action_index)
         if coords is None:
             raise ValueError(f"无效的动作索引: {action_index}")
 
-        # 阶段 1 & 2: 目标驱动的短期对局 (逻辑无变化)
+        # 阶段 1 & 2: 目标驱动的短期对局
         if self.curriculum_stage in [1, 2]:
             reward = -0.1
             terminated = False
@@ -308,7 +326,7 @@ class GameEnvironment(gym.Env):
                 from_sq = POS_TO_SQ[coords[0]]
                 to_sq = POS_TO_SQ[coords[1]]
                 
-                if self.board[to_sq] is not None and self.board[to_sq].player == -acting_player:
+                if self.board[to_sq] is not None and self.board[to_sq].player == -self.current_player:
                     reward = 1.0
                     terminated = True
                     self._apply_move_action(from_sq, to_sq)
@@ -319,11 +337,9 @@ class GameEnvironment(gym.Env):
                 truncated = True
                 reward = -1.0
 
-            self.current_player = -self.current_player
-            info = {'winner': acting_player if terminated else None, 'action_mask': self.action_masks()}
-            return self.get_state(), np.float32(reward), terminated, truncated, info
+            return reward, terminated, truncated
 
-        # 完整游戏逻辑 (逻辑无变化)
+        # 完整游戏逻辑
         reward = -0.0005
         
         if action_index < REVEAL_ACTIONS_COUNT:
@@ -343,25 +359,100 @@ class GameEnvironment(gym.Env):
         elif self.scores[-1] >= WINNING_SCORE:
             winner, terminated = -1, True
         
-        self.current_player = -self.current_player
-        
+        # 检查是否有合法动作
+        temp_current_player = self.current_player
+        self.current_player = -self.current_player  # 临时切换以检查对手的动作
         action_mask = self.action_masks()
+        self.current_player = temp_current_player  # 切换回来
+        
         if not terminated and not truncated and np.sum(action_mask) == 0:
-            winner = acting_player
+            winner = self.current_player
             terminated = True
 
         if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES:
             winner, truncated = 0, True
 
         if terminated:
-            if winner == acting_player:
+            if winner == self.current_player:
                 reward += 1.0
-            elif winner == -acting_player:
+            elif winner == -self.current_player:
                 reward -= 1.0
         elif truncated:
             reward -= 0.5
 
-        info = {'winner': winner, 'action_mask': action_mask}
+        return reward, terminated, truncated
+
+    def step(self, action_index):
+        acting_player = self.current_player
+    def step(self, action_index):
+        acting_player = self.current_player
+        
+        # 应用学习者的动作
+        reward, terminated, truncated = self._internal_apply_action(action_index)
+        
+        # 阶段 1 & 2: 目标驱动的短期对局 (保持原有逻辑)
+        if self.curriculum_stage in [1, 2]:
+            self.current_player = -self.current_player
+            info = {'winner': acting_player if terminated else None, 'action_mask': self.action_masks()}
+            return self.get_state(), np.float32(reward), terminated, truncated, info
+
+        # 切换玩家
+        self.current_player = -self.current_player
+
+        # 自我对弈逻辑：如果是对手的回合并且游戏未结束
+        while (self.current_player != self.learning_player_id and 
+               self.opponent_model is not None and not terminated and not truncated):
+
+            # 1. 对手观察当前状态
+            opponent_obs = self.get_state()
+            opponent_mask = self.action_masks()
+
+            # 2. 对手决策
+            try:
+                opponent_action, _ = self.opponent_model.predict(
+                    opponent_obs, action_masks=opponent_mask, deterministic=True
+                )
+                opponent_action = int(opponent_action)
+            except Exception as e:
+                print(f"警告：对手模型预测失败: {e}")
+                # 如果预测失败，随机选择一个合法动作
+                valid_actions = np.where(opponent_mask)[0]
+                if len(valid_actions) > 0:
+                    opponent_action = np.random.choice(valid_actions)
+                else:
+                    break  # 没有合法动作，跳出循环
+
+            # 3. 对手执行动作
+            try:
+                opponent_reward, term, trunc = self._internal_apply_action(opponent_action)
+                
+                # 4. 累加奖励并更新结束标志
+                reward += opponent_reward
+                terminated = terminated or term
+                truncated = truncated or trunc
+
+                # 5. 如果游戏未结束，切换回学习者
+                if not terminated and not truncated:
+                    self.current_player = -self.current_player
+                else:
+                    break  # 游戏已结束，跳出循环
+            except Exception as e:
+                print(f"警告：对手动作执行失败: {e}")
+                break
+
+        # 生成最终的动作掩码
+        action_mask = self.action_masks()
+        
+        # 如果游戏未结束但没有合法动作，设置游戏结束
+        if not terminated and not truncated and np.sum(action_mask) == 0:
+            winner = acting_player
+            terminated = True
+            if winner == acting_player:
+                reward += 1.0
+            elif winner == -acting_player:
+                reward -= 1.0
+
+        info = {'winner': acting_player if terminated else None, 'action_mask': action_mask}
         if (terminated or truncated) and self.render_mode == "human":
             self.render()
 
