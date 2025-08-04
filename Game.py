@@ -69,15 +69,26 @@ class GameEnvironment(gym.Env):
         self.learning_player_id = 1  # 学习者始终是玩家1（红方）
         self.opponent_model = None
         
-        # 如果提供了对手策略路径，则加载对手模型
-        if opponent_policy and os.path.exists(opponent_policy):
-            print(f"环境加载对手策略: {opponent_policy}")
+        # 【优化】使用共享对手模型管理器，避免重复加载
+        if opponent_policy:
             try:
-                from sb3_contrib import MaskablePPO
-                self.opponent_model = MaskablePPO.load(opponent_policy)
-            except Exception as e:
-                print(f"警告：无法加载对手模型 {opponent_policy}: {e}")
-                self.opponent_model = None
+                from opponent_model_manager import shared_opponent_manager
+                self.opponent_model = shared_opponent_manager.load_model(opponent_policy)
+                self.opponent_policy_path = opponent_policy
+                self.use_shared_manager = True
+            except ImportError:
+                # 降级到原有方式（保持兼容性）
+                if os.path.exists(opponent_policy):
+                    print(f"环境加载对手策略: {opponent_policy}")
+                    try:
+                        from sb3_contrib import MaskablePPO
+                        self.opponent_model = MaskablePPO.load(opponent_policy)
+                    except Exception as e:
+                        print(f"警告：无法加载对手模型 {opponent_policy}: {e}")
+                        self.opponent_model = None
+                self.use_shared_manager = False
+        else:
+            self.use_shared_manager = False
 
         # --- 【重要修改】状态空间定义 ---
         # 状态被分为两部分：棋盘的“图像”表示和全局的“标量”特征
@@ -409,10 +420,20 @@ class GameEnvironment(gym.Env):
 
             # 2. 对手决策
             try:
-                opponent_action, _ = self.opponent_model.predict(
-                    opponent_obs, action_masks=opponent_mask, deterministic=True
-                )
-                opponent_action = int(opponent_action)
+                if self.use_shared_manager:
+                    # 使用共享管理器进行预测
+                    from opponent_model_manager import shared_opponent_manager
+                    opponent_action = shared_opponent_manager.predict_single(
+                        opponent_obs, opponent_mask, deterministic=True
+                    )
+                    if opponent_action is None:
+                        raise Exception("共享管理器预测返回None")
+                else:
+                    # 传统方式预测
+                    opponent_action, _ = self.opponent_model.predict(
+                        opponent_obs, action_masks=opponent_mask, deterministic=True
+                    )
+                    opponent_action = int(opponent_action)
             except Exception as e:
                 print(f"警告：对手模型预测失败: {e}")
                 # 如果预测失败，随机选择一个合法动作
