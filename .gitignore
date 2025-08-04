@@ -29,3 +29,4 @@ banqi_cython_ppo_logs
 banqi_numpy_ppo_logs
 **logs
 *.zip
+training_plots
