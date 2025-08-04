@@ -1,4 +1,4 @@
-# Game.py - 基于Numpy向量的暗棋环境 (已集成课程学习)
+# Game.py - 基于Numpy向量的暗棋环境 (已修改以支持CNN)
 import random
 from enum import Enum
 import numpy as np
@@ -44,6 +44,7 @@ WINNING_SCORE = 60
 
 # --- 棋子属性 ---
 PIECE_VALUES = {pt: val for pt, val in zip(PieceType, [4, 10, 10, 10, 10, 20, 30])}
+# 每个玩家的棋子数量: 2兵, 1炮, 1马, 1车, 1相, 1仕, 1帅
 PIECE_MAX_COUNTS = {pt: val for pt, val in zip(PieceType, [2, 1, 1, 1, 1, 1, 1])}
 
 # --- 位置转换工具 ---
@@ -54,32 +55,32 @@ SQ_TO_POS = {sq: (sq // BOARD_COLS, sq % BOARD_COLS) for sq in range(TOTAL_POSIT
 class GameEnvironment(gym.Env):
     """
     基于Numpy布尔向量的暗棋Gym环境 (支持课程学习)。
+    【重要修改】: 状态空间已修改为支持CNN的字典格式。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    # --- 修改: __init__ 方法，增加 curriculum_stage 参数 ---
     def __init__(self, render_mode=None, curriculum_stage=4):
         super().__init__()
         self.render_mode = render_mode
-        # 新增: 保存课程学习阶段
         self.curriculum_stage = curriculum_stage
 
-        # --- 状态和动作空间定义 (无变化) ---
-        my_pieces_plane_size = NUM_PIECE_TYPES * TOTAL_POSITIONS
-        opponent_pieces_plane_size = NUM_PIECE_TYPES * TOTAL_POSITIONS
-        hidden_pieces_plane_size = TOTAL_POSITIONS
-        empty_plane_size = TOTAL_POSITIONS
-        scalar_features_size = 3
-        state_size = (my_pieces_plane_size + opponent_pieces_plane_size +
-                      hidden_pieces_plane_size + empty_plane_size + scalar_features_size)
-
-        self._my_pieces_plane_start_idx = 0
-        self._opponent_pieces_plane_start_idx = my_pieces_plane_size
-        self._hidden_pieces_plane_start_idx = self._opponent_pieces_plane_start_idx + opponent_pieces_plane_size
-        self._empty_plane_start_idx = self._hidden_pieces_plane_start_idx + hidden_pieces_plane_size
-        self._scalar_features_start_idx = self._empty_plane_start_idx + empty_plane_size
+        # --- 【重要修改】状态空间定义 ---
+        # 状态被分为两部分：棋盘的“图像”表示和全局的“标量”特征
+        # 1. 棋盘 "图像" 部分: (通道数, 高, 宽)
+        # 通道包括: 我方7种棋子 + 敌方7种棋子 + 暗棋 + 空位 = 16个通道
+        num_channels = NUM_PIECE_TYPES * 2 + 2
+        board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
         
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(state_size,), dtype=np.float32)
+        # 2. 标量特征部分: [我方得分, 敌方得分, 连续未吃子步数, 我方存活棋子(8), 敌方存活棋子(8)]
+        # 存活棋子向量的顺序为: [兵, 兵, 炮, 马, 车, 相, 仕, 帅]
+        scalar_shape = (3 + 8 + 8,)
+
+        # 使用Dict空间来组合这两部分
+        self.observation_space = spaces.Dict({
+            "board": spaces.Box(low=0.0, high=1.0, shape=board_shape, dtype=np.float32),
+            "scalars": spaces.Box(low=0.0, high=1.0, shape=scalar_shape, dtype=np.float32)
+        })
+
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
 
         # --- 核心数据结构 (无变化) ---
@@ -153,7 +154,7 @@ class GameEnvironment(gym.Env):
             self.revealed_vectors[player].fill(False)
         
         self.hidden_vector.fill(False)
-        self.empty_vector.fill(True) # 棋盘默认是空的
+        self.empty_vector.fill(True)
         self.board.fill(None)
         
         self.dead_pieces = {-1: [], 1: []}
@@ -172,56 +173,34 @@ class GameEnvironment(gym.Env):
                 else:
                     self.hidden_vector[sq] = True
 
-    # --- 修改: _initialize_board 函数，根据课程阶段设置棋盘 ---
     def _initialize_board(self):
         """根据课程学习阶段初始化棋盘和所有状态变量。"""
         self._reset_all_vectors_and_state()
 
         # 阶段 1: 吃子入门
         if self.curriculum_stage == 1:
-            # 红“車”在(1,1)，黑“卒”在(1,2)
             red_chariot = Piece(PieceType.CHARIOT, 1)
             red_chariot.revealed = True
             black_soldier = Piece(PieceType.SOLDIER, -1)
             black_soldier.revealed = True
-            
             self.board[POS_TO_SQ[(1, 1)]] = red_chariot
             self.board[POS_TO_SQ[(1, 2)]] = black_soldier
-            self.current_player = 1 # 确保红方先手
+            self.current_player = 1
 
         # 阶段 2: 简单战斗 (炮吃子)
         elif self.curriculum_stage == 2:
-            # 红“炮”在(0,0), 炮架在(0,1), 目标黑“卒”在(0,2)
             red_cannon = Piece(PieceType.CANNON, 1)
             red_cannon.revealed = True
-            red_horse_mount = Piece(PieceType.HORSE, 1) # 炮架
+            red_horse_mount = Piece(PieceType.HORSE, 1)
             red_horse_mount.revealed = True
             black_soldier_target = Piece(PieceType.SOLDIER, -1)
             black_soldier_target.revealed = True
-
             self.board[POS_TO_SQ[(0, 0)]] = red_cannon
             self.board[POS_TO_SQ[(0, 1)]] = red_horse_mount
             self.board[POS_TO_SQ[(0, 2)]] = black_soldier_target
             self.current_player = 1
 
-        # 阶段 3: 探索与决策
-        elif self.curriculum_stage == 3:
-            # 左半边明棋，右半边暗棋
-            pieces = [
-                Piece(PieceType.CHARIOT, 1), Piece(PieceType.HORSE, 1),
-                Piece(PieceType.CANNON, -1), Piece(PieceType.SOLDIER, -1),
-                Piece(PieceType.ELEPHANT, 1), Piece(PieceType.ADVISOR, -1)
-            ]
-            # 明棋
-            for i, piece in enumerate(pieces[:3]):
-                piece.revealed = True
-                self.board[POS_TO_SQ[(i, 0)]] = piece
-            # 暗棋
-            for i, piece in enumerate(pieces[3:]):
-                piece.revealed = False
-                self.board[POS_TO_SQ[(i, 3)]] = piece
-            self.current_player = 1
-
+        # 【重要修改】移除阶段3，所有其他情况都视为完整对局
         # 阶段 4: 完整对局 (原始逻辑)
         else:
             pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
@@ -233,12 +212,10 @@ class GameEnvironment(gym.Env):
             for sq in range(TOTAL_POSITIONS):
                 self.board[sq] = pieces[sq]
             
-            # 完整对局中，所有棋子开局都是暗的
             self.hidden_vector.fill(True)
             self.empty_vector.fill(False)
-            return # 直接返回，因为向量已经设置好
+            return
 
-        # 对于课程1,2,3，需要根据board内容更新向量
         self._update_vectors_from_board()
 
 
@@ -248,76 +225,111 @@ class GameEnvironment(gym.Env):
         return self.get_state(), {'action_mask': self.action_masks()}
     
     def get_state(self):
-        """根据当前的状态向量动态生成供模型观察的状态 (无变化)。"""
-        state = np.zeros(self.observation_space.shape[0], dtype=np.float32)
+        """
+        【重要修改】根据当前的状态向量动态生成供CNN模型观察的字典格式状态。
+        新增了双方棋子存活状态的向量。
+        """
         my_player = self.current_player
         opponent_player = -self.current_player
 
+        # 1. 构建棋盘 "图像" 部分 (16, 4, 4)
+        board_state_list = []
+        # 我方棋子 (7个通道)
         for pt_val in range(NUM_PIECE_TYPES):
-            start_idx = self._my_pieces_plane_start_idx + pt_val * TOTAL_POSITIONS
-            state[start_idx : start_idx + TOTAL_POSITIONS] = self.piece_vectors[my_player][pt_val].astype(np.float32)
-            start_idx = self._opponent_pieces_plane_start_idx + pt_val * TOTAL_POSITIONS
-            state[start_idx : start_idx + TOTAL_POSITIONS] = self.piece_vectors[opponent_player][pt_val].astype(np.float32)
+            board_state_list.append(self.piece_vectors[my_player][pt_val].reshape(BOARD_ROWS, BOARD_COLS))
+        # 敌方棋子 (7个通道)
+        for pt_val in range(NUM_PIECE_TYPES):
+            board_state_list.append(self.piece_vectors[opponent_player][pt_val].reshape(BOARD_ROWS, BOARD_COLS))
+        # 暗棋 (1个通道)
+        board_state_list.append(self.hidden_vector.reshape(BOARD_ROWS, BOARD_COLS))
+        # 空位 (1个通道)
+        board_state_list.append(self.empty_vector.reshape(BOARD_ROWS, BOARD_COLS))
         
-        state[self._hidden_pieces_plane_start_idx : self._hidden_pieces_plane_start_idx + TOTAL_POSITIONS] = self.hidden_vector.astype(np.float32)
-        state[self._empty_plane_start_idx : self._empty_plane_start_idx + TOTAL_POSITIONS] = self.empty_vector.astype(np.float32)
-        
+        board_state = np.array(board_state_list, dtype=np.float32)
+
+        # 2. 构建标量特征部分
+        # 2.1 基础标量 (得分, 步数)
         score_norm = WINNING_SCORE if WINNING_SCORE > 0 else 1.0
         move_norm = MAX_CONSECUTIVE_MOVES if MAX_CONSECUTIVE_MOVES > 0 else 1.0
-        scalar_idx = self._scalar_features_start_idx
         
-        state[scalar_idx] = self.scores[my_player] / score_norm
-        state[scalar_idx + 1] = self.scores[opponent_player] / score_norm
-        state[scalar_idx + 2] = self.move_counter / move_norm
-        
-        return state
+        base_scalars = np.array([
+            self.scores[my_player] / score_norm,
+            self.scores[opponent_player] / score_norm,
+            self.move_counter / move_norm
+        ], dtype=np.float32)
 
-    # --- 修改: step函数，根据课程阶段调整奖励和结束条件 ---
+        # 2.2 棋子存活状态向量
+        def _get_piece_survival_vector(player):
+            """
+            生成指定玩家的棋子存活向量 (8个元素)。
+            顺序: 兵, 兵, 炮, 马, 车, 相, 仕, 帅
+            存活为1, 死亡为0.
+            """
+            # 向量顺序: [SOLDIER, SOLDIER, CANNON, HORSE, CHARIOT, ELEPHANT, ADVISOR, GENERAL]
+            survival_vector = np.ones(8, dtype=np.float32)
+            dead_soldier_count = 0
+            
+            for dead_piece in self.dead_pieces[player]:
+                pt = dead_piece.piece_type
+                if pt == PieceType.SOLDIER:
+                    if dead_soldier_count < 2:
+                        survival_vector[dead_soldier_count] = 0.0
+                    dead_soldier_count += 1
+                else:
+                    # pt.value: CANNON=1, HORSE=2, ... GENERAL=6
+                    # index: CANNON=2, HORSE=3, ... GENERAL=7
+                    # index = pt.value + 1
+                    idx = pt.value + 1
+                    survival_vector[idx] = 0.0
+            return survival_vector
+
+        my_survival_vector = _get_piece_survival_vector(my_player)
+        opponent_survival_vector = _get_piece_survival_vector(opponent_player)
+        
+        # 2.3 组合所有标量
+        scalar_state = np.concatenate([base_scalars, my_survival_vector, opponent_survival_vector])
+        
+        # 3. 组合成字典返回
+        return {"board": board_state, "scalars": scalar_state}
+
     def step(self, action_index):
         acting_player = self.current_player
         coords = self.action_to_coords.get(action_index)
         if coords is None:
             raise ValueError(f"无效的动作索引: {action_index}")
 
-        # --- 课程学习的特殊逻辑 ---
-        # 阶段 1 & 2: 目标驱动的短期对局
+        # 阶段 1 & 2: 目标驱动的短期对局 (逻辑无变化)
         if self.curriculum_stage in [1, 2]:
-            reward = -0.1 # 每一步都有一个小惩罚，鼓励快速完成目标
+            reward = -0.1
             terminated = False
             truncated = False
             
-            # 只有移动/攻击动作
             if action_index >= REVEAL_ACTIONS_COUNT:
                 from_sq = POS_TO_SQ[coords[0]]
                 to_sq = POS_TO_SQ[coords[1]]
                 
-                # 检查是否是吃子
                 if self.board[to_sq] is not None and self.board[to_sq].player == -acting_player:
-                    reward = 1.0  # 成功吃子，巨大奖励
-                    terminated = True # 游戏结束
-                    self._apply_move_action(from_sq, to_sq) # 执行动作
+                    reward = 1.0
+                    terminated = True
+                    self._apply_move_action(from_sq, to_sq)
                 else:
-                    self._apply_move_action(from_sq, to_sq) # 只是移动
+                    self._apply_move_action(from_sq, to_sq)
             
-            # 如果走了5步还没吃子，就结束
             if not terminated and self.move_counter >= 5:
                 truncated = True
-                reward = -1.0 # 失败惩罚
+                reward = -1.0
 
             self.current_player = -self.current_player
             info = {'winner': acting_player if terminated else None, 'action_mask': self.action_masks()}
             return self.get_state(), np.float32(reward), terminated, truncated, info
 
-        # --- 阶段 3 & 4: 完整游戏逻辑 ---
-        reward = -0.0005  # 时间惩罚
+        # 完整游戏逻辑 (逻辑无变化)
+        reward = -0.0005
         
         if action_index < REVEAL_ACTIONS_COUNT:
             from_sq = POS_TO_SQ[coords]
             self._apply_reveal_update(from_sq)
             self.move_counter = 0
-            # 阶段3: 鼓励翻棋
-            if self.curriculum_stage == 3:
-                reward += 0.001 
         else:
             from_sq = POS_TO_SQ[coords[0]]
             to_sq = POS_TO_SQ[coords[1]]
