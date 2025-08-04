@@ -72,7 +72,7 @@ class GameEnvironment(gym.Env):
         # 【优化】使用共享对手模型管理器，避免重复加载
         if opponent_policy:
             try:
-                from opponent_model_manager import shared_opponent_manager
+                from training.manager import shared_opponent_manager
                 self.opponent_model = shared_opponent_manager.load_model(opponent_policy)
                 self.opponent_policy_path = opponent_policy
                 self.use_shared_manager = True
@@ -81,6 +81,10 @@ class GameEnvironment(gym.Env):
                 if os.path.exists(opponent_policy):
                     print(f"环境加载对手策略: {opponent_policy}")
                     try:
+                        # 设置向后兼容性
+                        from utils.model_compatibility import setup_legacy_imports
+                        setup_legacy_imports()
+                            
                         from sb3_contrib import MaskablePPO
                         self.opponent_model = MaskablePPO.load(opponent_policy)
                     except Exception as e:
@@ -325,7 +329,14 @@ class GameEnvironment(gym.Env):
         """
         coords = self.action_to_coords.get(action_index)
         if coords is None:
-            raise ValueError(f"无效的动作索引: {action_index}")
+            print(f"警告：无效的动作索引: {action_index}")
+            return -1.0, False, True  # 惩罚无效动作
+            
+        # 检查动作有效性
+        action_mask = self.action_masks()
+        if not action_mask[action_index]:
+            print(f"警告：试图执行无效动作: {action_index}, coords: {coords}")
+            return -1.0, False, True  # 惩罚无效动作
 
         # 阶段 1 & 2: 目标驱动的短期对局
         if self.curriculum_stage in [1, 2]:
@@ -422,7 +433,7 @@ class GameEnvironment(gym.Env):
             try:
                 if self.use_shared_manager:
                     # 使用共享管理器进行预测
-                    from opponent_model_manager import shared_opponent_manager
+                    from training.manager import shared_opponent_manager
                     opponent_action = shared_opponent_manager.predict_single(
                         opponent_obs, opponent_mask, deterministic=True
                     )
@@ -482,6 +493,17 @@ class GameEnvironment(gym.Env):
     def _apply_reveal_update(self, from_sq):
         """应用翻棋动作并更新状态向量。"""
         piece = self.board[from_sq]
+        
+        # 安全检查：确保位置有棋子
+        if piece is None:
+            print(f"警告：试图翻开空位置 {from_sq} 的棋子")
+            return
+            
+        # 安全检查：确保棋子未被翻开
+        if piece.revealed:
+            print(f"警告：试图翻开已经翻开的棋子 at {from_sq}")
+            return
+            
         piece.revealed = True
         self.hidden_vector[from_sq] = False
         self.revealed_vectors[piece.player][from_sq] = True
@@ -491,9 +513,21 @@ class GameEnvironment(gym.Env):
         """应用移动或攻击动作并更新状态向量。"""
         attacker = self.board[from_sq]
         defender = self.board[to_sq]
+        
+        # 安全检查：确保攻击者存在
+        if attacker is None:
+            print(f"警告：试图从空位置 {from_sq} 移动棋子")
+            return 0.0
+            
+        # 安全检查：确保攻击者已被翻开
+        if not attacker.revealed:
+            print(f"警告：试图移动未翻开的棋子 at {from_sq}")
+            return 0.0
+        
         reward = 0.0
 
         if defender is None:
+            # 移动到空位置
             self.board[to_sq], self.board[from_sq] = attacker, None
             self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
             self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
@@ -504,6 +538,7 @@ class GameEnvironment(gym.Env):
             self.move_counter += 1
             return 0.0
 
+        # 攻击逻辑
         points = PIECE_VALUES[defender.piece_type]
         is_cannon_attack = attacker.piece_type == PieceType.CANNON
         

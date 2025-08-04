@@ -1,4 +1,4 @@
-# opponent_model_manager.py (修改后)
+# training/manager.py - 共享对手模型管理器
 import os
 import numpy as np
 from typing import Optional, List, Dict, Any
@@ -28,6 +28,10 @@ class SharedOpponentModelManager:
             if os.path.exists(model_path):
                 print(f"📦 共享模型管理器：从磁盘加载对手模型 {model_path}")
                 try:
+                    # 设置向后兼容性
+                    from utils.model_compatibility import setup_legacy_imports
+                    setup_legacy_imports()
+                    
                     # 我们为模型指定一个设备，以确保一致性
                     self._model = MaskablePPO.load(model_path, device='auto')
                     self._model_path = model_path
