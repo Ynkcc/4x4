@@ -1,4 +1,4 @@
-# opponent_model_manager.py - 对手模型管理器
+# opponent_model_manager.py (修改后)
 import os
 import numpy as np
 from typing import Optional, List, Dict, Any
@@ -8,6 +8,7 @@ class SharedOpponentModelManager:
     """
     共享的对手模型管理器
     解决多环境中重复加载同一模型的问题
+    【优化】增加了从内存直接更新模型的功能
     """
     _instance = None
     _model = None
@@ -25,9 +26,10 @@ class SharedOpponentModelManager:
         """
         if model_path != self._model_path or self._model is None:
             if os.path.exists(model_path):
-                print(f"📦 共享模型管理器：加载对手模型 {model_path}")
+                print(f"📦 共享模型管理器：从磁盘加载对手模型 {model_path}")
                 try:
-                    self._model = MaskablePPO.load(model_path)
+                    # 我们为模型指定一个设备，以确保一致性
+                    self._model = MaskablePPO.load(model_path, device='auto')
                     self._model_path = model_path
                     print(f"✅ 成功加载对手模型，将被多个环境共享使用")
                 except Exception as e:
@@ -40,7 +42,25 @@ class SharedOpponentModelManager:
                 self._model_path = None
         
         return self._model
-    
+        
+    # 【新增的优化方法】
+    def update_model_from_learner(self, learner_model: MaskablePPO):
+        """
+        直接从内存中用learner的权重更新当前持有的opponent模型。
+        这是一个非常高效的操作，避免了磁盘I/O。
+        """
+        if self._model is None:
+            print("⚠️ 警告: 对手模型尚未初始化，无法从内存更新。")
+            return
+
+        print("🧠 正在从内存直接更新对手模型权重...")
+        # 从learner的策略网络中提取最新的权重
+        learner_weights = learner_model.policy.state_dict()
+        # 将权重加载到opponent的策略网络中
+        self._model.policy.load_state_dict(learner_weights)
+        print("✅ 对手模型权重已在内存中更新完毕！")
+
+
     def predict_single(self, observation: Dict, action_mask: np.ndarray, deterministic: bool = True) -> Optional[int]:
         """
         单个预测
