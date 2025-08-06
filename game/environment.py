@@ -1,3 +1,4 @@
+# game/environment.py
 # Game.py - 基于Numpy向量的暗棋环境 (已修改以支持CNN)
 import os
 import random
@@ -252,8 +253,8 @@ class GameEnvironment(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._initialize_board()
-        # 在info中增加一个'winner'键以保持与step返回格式一致
-        info = {'action_mask': self.action_masks(), 'winner': None}
+        # 【变更】使用 self.current_player 调用 action_masks
+        info = {'action_mask': self.action_masks(self.current_player), 'winner': None}
         return self.get_state(), info
     
     def get_state(self):
@@ -331,19 +332,27 @@ class GameEnvironment(gym.Env):
         """
         coords = self.action_to_coords.get(action_index)
         if coords is None:
-            # 这个警告不应该在正常训练中出现，因为模型受action_mask限制
-            # 但在调试或非预期输入时可能有用
-            print(f"警告：无效的动作索引: {action_index}")
-            return -1.0, False, True, None  # 惩罚无效动作
+            raise ValueError(f"错误：无效的动作索引: {action_index}")
             
-        # 检查动作有效性
-        action_mask = self.action_masks()
-        if not action_mask[action_index]:
-            print(f"警告：试图执行无效动作: {action_index}, coords: {coords}")
-            # 返回截断状态，强制环境重置
-            return -1.0, False, True, None
+        # 【变更】直接传入当前玩家ID调用action_masks
+        action_mask = self.action_masks(self.current_player)
         
-        # winner在游戏结束时被赋值
+        # 【重要修改】检测到无效动作时，不再打印警告，而是抛出带有详细信息的异常
+        if not action_mask[action_index]:
+            debug_info = self.get_debug_state_string()
+            error_msg = (
+                f"\n{'='*80}\n"
+                f"错误：试图执行无效动作!\n"
+                f"  - 动作索引: {action_index}\n"
+                f"  - 动作坐标: {coords}\n"
+                f"  - 当前玩家: {self.current_player}\n"
+                f"{'='*80}\n"
+                f"环境当前状态:\n{debug_info}\n"
+                f"  - 当前合法的动作掩码中，值为1的数量: {np.sum(action_mask)}\n"
+                f"{'='*80}"
+            )
+            raise ValueError(error_msg)
+        
         winner = None
 
         # 阶段 1 & 2: 目标驱动的短期对局
@@ -391,20 +400,15 @@ class GameEnvironment(gym.Env):
         elif self.scores[-1] >= WINNING_SCORE:
             winner, terminated = -1, True
         
-        # 检查对手是否有合法动作
-        # 临时切换玩家以检查对手的动作
-        self.current_player = -self.current_player
-        opponent_action_mask = self.action_masks()
-        # 切换回来
-        self.current_player = -self.current_player
+        # 【优化】不再需要临时切换玩家，直接传入对手ID调用action_masks
+        opponent_player_id = -self.current_player
+        opponent_action_mask = self.action_masks(opponent_player_id)
         
         if not terminated and not truncated and np.sum(opponent_action_mask) == 0:
-            # 如果对手无棋可走，当前玩家获胜
             winner = self.current_player
             terminated = True
 
         if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES:
-            # 达到最大步数，平局
             winner, truncated = 0, True
 
         if terminated:
@@ -413,88 +417,72 @@ class GameEnvironment(gym.Env):
             elif winner == -self.current_player:
                 reward -= 1.0
         elif truncated:
-            # 平局惩罚
             reward -= 0.5
 
         return reward, terminated, truncated, winner
 
-    # 【修复】移除了重复的 step 方法定义
     def step(self, action_index):
-        acting_player = self.current_player
-        
-        # 应用学习者的动作
+        # 1. 应用学习者的动作
         reward, terminated, truncated, winner = self._internal_apply_action(action_index)
-        
-        # 如果游戏因此动作结束，则直接返回
+
+        # 2. 如果学习者的动作直接结束游戏，准备信息并返回
         if terminated or truncated:
-            info = {'winner': winner, 'action_mask': self.action_masks()}
+            # 【变更】使用 self.current_player 调用 action_masks
+            info = {'winner': winner, 'action_mask': self.action_masks(self.current_player)}
             return self.get_state(), np.float32(reward), terminated, truncated, info
 
-        # 切换玩家
+        # 3. ---- 进入对手回合 ----
         self.current_player = -self.current_player
 
-        # 自我对弈逻辑：如果是对手的回合并且游戏未结束
-        if (self.current_player != self.learning_player_id and 
-            self.opponent_model is not None):
-
-            # 1. 对手观察当前状态
+        if self.opponent_model is not None:
             opponent_obs = self.get_state()
-            opponent_mask = self.action_masks()
+            # 【变更】使用 self.current_player (现在是对手) 调用 action_masks
+            opponent_mask = self.action_masks(self.current_player)
 
-            # 如果对手没有合法动作，游戏应该在上面已经结束了，但作为安全检查
             if np.sum(opponent_mask) == 0:
-                # 这种情况理论上不应发生，因为_internal_apply_action已检查
-                # 但如果发生，则对手输，学习者赢
                 winner = self.learning_player_id
                 terminated = True
-                info = {'winner': winner, 'action_mask': opponent_mask}
-                return self.get_state(), np.float32(reward + 1.0), terminated, truncated, info
+            else:
+                try:
+                    if self.use_shared_manager:
+                        from training.manager import shared_opponent_manager
+                        opponent_action = shared_opponent_manager.predict_single(
+                            opponent_obs, opponent_mask, deterministic=True
+                        )
+                    else:
+                        opponent_action, _ = self.opponent_model.predict(
+                            opponent_obs, action_masks=opponent_mask, deterministic=True
+                        )
+                    opponent_action = int(opponent_action) if opponent_action is not None else np.random.choice(np.where(opponent_mask)[0])
+                except Exception as e:
+                    print(f"警告：对手模型预测失败: {e}。将随机选择一个有效动作。")
+                    valid_actions = np.where(opponent_mask)[0]
+                    opponent_action = np.random.choice(valid_actions)
+                
+                opponent_reward, terminated, truncated, winner = self._internal_apply_action(opponent_action)
+                reward -= opponent_reward
 
-            # 2. 对手决策
-            try:
-                if self.use_shared_manager:
-                    from training.manager import shared_opponent_manager
-                    opponent_action = shared_opponent_manager.predict_single(
-                        opponent_obs, opponent_mask, deterministic=True
-                    )
-                    if opponent_action is None:
-                        raise ValueError("共享管理器预测返回None")
-                else:
-                    opponent_action, _ = self.opponent_model.predict(
-                        opponent_obs, action_masks=opponent_mask, deterministic=True
-                    )
-                opponent_action = int(opponent_action)
-            except Exception as e:
-                print(f"警告：对手模型预测失败: {e}。将随机选择一个有效动作。")
-                valid_actions = np.where(opponent_mask)[0]
-                opponent_action = np.random.choice(valid_actions)
+        # 4. ---- 准备返回 ----
+        # 无论如何，在返回前都必须切换回学习者的视角
+        self.current_player = self.learning_player_id
+        
+        # 在正确的学习者视角下，获取最终的状态和信息
+        final_obs = self.get_state()
+        # 【变更】使用 self.current_player (现在是学习者) 调用 action_masks
+        final_mask = self.action_masks(self.current_player)
+        info = {'winner': winner, 'action_mask': final_mask}
 
-            # 3. 对手执行动作
-            opponent_reward, terminated, truncated, winner = self._internal_apply_action(opponent_action)
-            
-            # 4. 累加奖励 (注意：奖励是从学习者的角度计算的)
-            # 对手的奖励对学习者来说是负的
-            reward -= opponent_reward
-
-            # 5. 如果游戏未结束，切换回学习者
-            if not terminated and not truncated:
-                self.current_player = -self.current_player
-
-        # 最终信息包
-        info = {'winner': winner, 'action_mask': self.action_masks()}
         if (terminated or truncated) and self.render_mode == "human":
             self.render()
 
-        return self.get_state(), np.float32(reward), terminated, truncated, info
+        return final_obs, np.float32(reward), terminated, truncated, info
 
     def _apply_reveal_update(self, from_sq):
         """应用翻棋动作并更新状态向量。"""
         piece = self.board[from_sq]
         
         if piece is None or piece.revealed:
-            # 这种检查主要用于调试，理论上不应被合法动作触发
-            print(f"警告：试图翻开空或已翻开的位置 {from_sq}")
-            return
+            raise ValueError(f"错误：试图翻开空或已翻开的位置 {from_sq}")
             
         piece.revealed = True
         self.hidden_vector[from_sq] = False
@@ -507,8 +495,7 @@ class GameEnvironment(gym.Env):
         defender = self.board[to_sq]
         
         if attacker is None or not attacker.revealed:
-            print(f"警告：试图从 {from_sq} 移动空或未翻开的棋子")
-            return 0.0
+            raise ValueError(f"错误：试图从 {from_sq} 移动空或未翻开的棋子")
         
         reward = 0.0
 
@@ -528,7 +515,6 @@ class GameEnvironment(gym.Env):
         points = PIECE_VALUES[defender.piece_type]
         is_cannon_attack = attacker.piece_type == PieceType.CANNON
         
-        # 注意：此处规则不标准，如自杀加对方分。按原逻辑实现。
         if is_cannon_attack and attacker.player == defender.player:
             self.scores[-attacker.player] += points
             reward = -float(points)
@@ -554,12 +540,17 @@ class GameEnvironment(gym.Env):
         
         return reward
 
-    def action_masks(self):
-        """生成当前玩家所有合法动作的掩码 (无变化)。"""
+    # 【变更】action_masks 方法现在接受一个可选的 player_id 参数
+    def action_masks(self, player_id: int = None):
+        """
+        为指定的玩家生成所有合法动作的掩码。
+        :param player_id: 需要生成动作掩码的玩家 (1 或 -1)。如果为None，则使用current_player。
+        """
         action_mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
-        my_player = self.current_player
+        my_player = player_id if player_id is not None else self.current_player
         
         hidden_squares = np.where(self.hidden_vector)[0]
+        # 翻棋动作不区分玩家
         for sq in hidden_squares:
             action_mask[self.coords_to_action[SQ_TO_POS[sq]]] = 1
             
@@ -649,6 +640,37 @@ class GameEnvironment(gym.Env):
         player_str = "\033[91m红方\033[0m" if self.current_player == 1 else "\033[94m黑方\033[0m"
         print(f"\n当前玩家: {player_str}, 得分: (红) {self.scores[1]} - {self.scores[-1]} (黑), "
               f"连续未吃/翻子: {self.move_counter}/{MAX_CONSECUTIVE_MOVES}\n")
+
+    def get_debug_state_string(self) -> str:
+        """【新增】返回一个包含详细调试信息的字符串。"""
+        red_map = {p: c for p, c in zip(PieceType, "兵炮马俥相仕帥")}
+        black_map = {p: c for p, c in zip(PieceType, "卒炮馬車象士將")}
+        
+        board_str = "  " + "-" * 21 + "\n"
+        for r in range(4):
+            board_str += f"{r} |"
+            for c in range(4):
+                sq = POS_TO_SQ[(r, c)]
+                piece = self.board[sq]
+                if piece is None:
+                    board_str += "    |"
+                elif not piece.revealed:
+                    board_str += " 暗  |"
+                elif piece.player == 1:
+                    board_str += f" {red_map[piece.piece_type]}  |"
+                else:
+                    board_str += f" {black_map[piece.piece_type]}  |"
+            board_str += "\n  " + "-" * 21 + "\n"
+        board_str += "    " + "   ".join(str(c) for c in range(4))
+
+        state_str = (
+            f"棋盘布局:\n{board_str}\n\n"
+            f"核心状态:\n"
+            f"  - 当前玩家: {'红方(1)' if self.current_player == 1 else '黑方(-1)'}\n"
+            f"  - 连续未吃子步数: {self.move_counter}\n"
+            f"  - 得分 (红/黑): {self.scores[1]} / {self.scores[-1]}\n"
+        )
+        return state_str
 
     def close(self):
         pass

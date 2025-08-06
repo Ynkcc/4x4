@@ -320,12 +320,13 @@ class MainWindow(QMainWindow):
         self.selected_from_sq = None
         self.ai_thinking = False
         self.game_over = False
+        # 【修正】reset方法返回的info中包含初始动作掩码
         _, info = self.game.reset()
-        self.valid_action_mask = info['action_mask']
+        self.valid_action_mask = info.get('action_mask', np.zeros(ACTION_SPACE_SIZE, dtype=int))
         self.update_gui()
 
-        # 如果AI是红方且游戏刚开始，让AI先行
-        if self.ai_player == 1 or self.ai_player == "both":
+        # 如果AI是红方或AI对战模式，让AI先行
+        if not self.game_over and (self.ai_player == self.game.current_player or self.ai_player == "both"):
             self.schedule_ai_move()
 
     def on_board_click(self, pos):
@@ -334,7 +335,7 @@ class MainWindow(QMainWindow):
             return
 
         # 检查是否轮到人类玩家
-        if self.ai_player == self.game.current_player or self.ai_player == "both":
+        if self.ai_player is not None and (self.ai_player == self.game.current_player or self.ai_player == "both"):
             return
 
         clicked_sq = POS_TO_SQ[pos]
@@ -373,12 +374,17 @@ class MainWindow(QMainWindow):
                 self.update_gui()
 
     def make_move(self, action_index):
-        """执行一步棋并更新状态。"""
-        # 记录移动
+        """
+        【核心修正】执行一步棋并更新状态。
+        此版本不再使用 game.step()，而是使用更底层的函数来手动控制游戏流程。
+        """
+        if self.game_over:
+            return
+            
+        # 记录移动日志
         coords = self.game.action_to_coords.get(action_index)
+        player_name = "红方" if self.game.current_player == 1 else "黑方"
         move_desc = ""
-        piece_name = ""
-        
         if action_index < REVEAL_ACTIONS_COUNT:
             move_desc = f"翻开了 ({coords[0]}, {coords[1]}) 位置的棋子"
         else:
@@ -386,51 +392,64 @@ class MainWindow(QMainWindow):
             to_sq = POS_TO_SQ[coords[1]]
             attacker = self.game.board[from_sq]
             defender = self.game.board[to_sq]
-            
-            attacker_name = attacker.piece_type.name
+            attacker_name = attacker.piece_type.name if attacker else "未知"
             if defender is None:
                 move_desc = f"将 {attacker_name} 从 {coords[0]} 移动到 {coords[1]}"
             else:
                 defender_name = defender.piece_type.name
                 move_desc = f"用 {attacker_name} 从 {coords[0]} 吃掉了 {coords[1]} 的 {defender_name}"
-        
-        player_name = "红方" if self.game.current_player == 1 else "黑方"
         self.log_message(f"{player_name}: {move_desc}")
 
-        # 执行移动
-        state, reward, terminated, truncated, info = self.game.step(action_index)
+        # --- 修正逻辑开始 ---
+        # 1. 调用内部函数，只应用一个动作，不触发对手回合
+        _, terminated, truncated, winner = self.game._internal_apply_action(action_index)
         self.selected_from_sq = None
-        self.valid_action_mask = info['action_mask']
 
-        # 检查游戏结束
+        # 2. 检查游戏是否在这一步结束
         if terminated or truncated:
             self.game_over = True
-            winner = info.get('winner', 0)
             if winner == 1:
                 self.log_message("--- 游戏结束: 红方获胜! ---")
             elif winner == -1:
                 self.log_message("--- 游戏结束: 黑方获胜! ---")
             else:
                 self.log_message("--- 游戏结束: 平局! ---")
+        else:
+            # 3. 如果游戏未结束，手动切换玩家
+            self.game.current_player *= -1
+            # 4. 为新玩家获取合法的动作
+            self.valid_action_mask = self.game.action_masks()
+            # 5. 再次检查新玩家是否有棋可走
+            if np.sum(self.valid_action_mask) == 0:
+                self.game_over = True
+                # 当前玩家无棋可走，对手获胜
+                winner = -self.game.current_player
+                winner_name = "红方" if winner == 1 else "黑方"
+                self.log_message(f"--- {player_name} 无棋可走，{winner_name}获胜! ---")
 
+        # --- 修正逻辑结束 ---
+
+        # 更新UI
         self.update_gui()
 
         # 如果游戏没结束且轮到AI，安排AI移动
-        if not self.game_over and (self.ai_player == self.game.current_player or self.ai_player == "both"):
+        if not self.game_over and self.ai_player is not None and \
+           (self.ai_player == self.game.current_player or self.ai_player == "both"):
             self.schedule_ai_move()
 
     def schedule_ai_move(self):
         """安排AI移动。"""
-        if self.ai_model is None:
+        if self.game_over or self.ai_model is None:
             return
 
         delay = int(self.ai_delay_edit.text() or "500")
         self.ai_thinking = True
         self.update_gui() # 立即更新UI以显示“思考中”
-        self.ai_timer.start(delay)
-
+        
         player_name = "红方" if self.game.current_player == 1 else "黑方"
         self.log_message(f"{player_name} (AI) 正在思考...")
+        
+        self.ai_timer.start(delay)
 
     def make_ai_move(self):
         """执行AI移动。"""
@@ -443,19 +462,23 @@ class MainWindow(QMainWindow):
             action_mask = self.valid_action_mask.astype(bool)
 
             if not np.any(action_mask):
-                self.log_message("AI发现无棋可走")
+                self.log_message("AI发现无棋可走，游戏逻辑应已处理此情况。")
                 self.ai_thinking = False
-                # 在这种情况下，游戏逻辑应该已经判定了输赢，这里只是UI侧的日志
                 return
 
             action, _ = self.ai_model.predict(state, action_masks=action_mask, deterministic=True)
+            
+            # AI移动后，立即清除思考状态
+            self.ai_thinking = False
             self.make_move(int(action))
 
         except Exception as e:
             self.log_message(f"AI移动出错: {str(e)}")
-        finally:
+            import traceback
+            traceback.print_exc()
             self.ai_thinking = False
-            # 再次更新GUI以消除“思考中”状态
+        finally:
+            # 确保UI在任何情况下都能刷新
             self.update_gui()
 
 
@@ -490,7 +513,7 @@ class MainWindow(QMainWindow):
         movable_pieces_pos = set()
 
         is_human_turn = (not self.ai_thinking and not self.game_over and
-                         self.ai_player != self.game.current_player and self.ai_player != "both")
+                         (self.ai_player is None or (self.ai_player != "both" and self.ai_player != self.game.current_player)))
 
         if is_human_turn:
             if self.selected_from_sq is not None:
@@ -534,8 +557,8 @@ class MainWindow(QMainWindow):
                 stylesheet = "QPushButton { border: 2px solid #AAAAAA; }"
                 
                 button.setEnabled(is_human_turn)
-                if not is_human_turn:
-                    stylesheet += "QPushButton { background-color: #F0F0F0; }"
+                if not is_human_turn and not self.game_over:
+                     stylesheet += "QPushButton { background-color: #F0F0F0; }"
                 
                 # --- 应用高亮样式 (顺序很重要) ---
                 # 1. 目标位置高亮
@@ -573,7 +596,7 @@ class MainWindow(QMainWindow):
         # 当前玩家
         player_name = "红方" if self.game.current_player == 1 else "黑方"
         player_role = ""
-        if self.ai_player is not None:
+        if self.ai_player is not None and not self.game_over:
              if self.ai_player == self.game.current_player or self.ai_player == "both":
                  player_role = " (AI)"
              else:
@@ -625,6 +648,11 @@ class MainWindow(QMainWindow):
                 self.player_bb_widgets[p][pt.value].update_bitboard(bb_val)
 
 if __name__ == '__main__':
+    # 确保项目根目录在 sys.path 中，以便能正确找到 game 和 utils 模块
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+        
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
