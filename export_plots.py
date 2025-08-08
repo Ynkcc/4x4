@@ -1,4 +1,11 @@
 import os
+import warnings
+
+# 禁用TensorFlow警告
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 禁用INFO和WARNING日志
+warnings.filterwarnings('ignore', category=UserWarning, module='google.protobuf')
+
+import os
 import matplotlib.pyplot as plt
 from tbparse import SummaryReader
 import matplotlib.font_manager as fm
