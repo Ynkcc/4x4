@@ -7,9 +7,7 @@ import warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 禁用INFO和WARNING日志
 warnings.filterwarnings('ignore', category=UserWarning, module='google.protobuf')
 
-# 设置模型兼容性
-from utils.model_compatibility import setup_legacy_imports
-setup_legacy_imports()
+# 【移除】不再需要设置模型兼容性
 
 from training.trainer import SelfPlayTrainer
 

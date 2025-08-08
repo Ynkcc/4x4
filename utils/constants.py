@@ -30,7 +30,7 @@ STEPS_PER_LOOP = 16384
 # 初始学习率
 INITIAL_LR = 3e-4 
 # 并行环境数量
-N_ENVS = 8
+N_ENVS = 1
 
 # --- Elo评估超参数 ---
 # 评估时进行多少局游戏 (增加到更可靠的数量)
@@ -38,4 +38,4 @@ EVALUATION_GAMES = 100
 # 挑战者胜率需要超过多少才能取代主宰者
 EVALUATION_THRESHOLD = 0.55 
 # 评估时使用的并行环境数量
-EVALUATION_N_ENVS = 4
+EVALUATION_N_ENVS = 1

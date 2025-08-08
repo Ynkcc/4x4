@@ -122,19 +122,18 @@ class GameEnvironment(gym.Env):
         if not os.path.exists(model_path):
              raise FileNotFoundError(f"环境内错误：找不到对手模型文件: {model_path}")
         try:
-            # 确保旧模型兼容性
-            from utils.model_compatibility import setup_legacy_imports
-            setup_legacy_imports()
+            # 【移除】不再需要模型兼容性设置
             self.opponent_model = MaskablePPO.load(model_path, device='cpu') # 在环境中通常使用CPU
             self.opponent_model_path = model_path
             # print(f"进程 {os.getpid()}: 已加载对手模型 {os.path.basename(model_path)}")
         except Exception as e:
             raise RuntimeError(f"环境内错误：加载对手模型 {model_path} 失败: {e}")
 
-    # 【修复】新增：暴露给 VecEnv.env_method 的公共接口
+    # 【修复】【关键点】暴露给 VecEnv.env_method 的公共接口
     def update_opponent(self, new_model_path: str):
         """
         公开的方法，用于从外部（例如训练器主进程）更新此环境的对手模型。
+        当 trainer 调用 `env.env_method("update_opponent", ...)` 时，此方法会被执行。
         """
         print(f"进程 {os.getpid()}: 收到指令，正在更新对手模型为 {os.path.basename(new_model_path)}...")
         self._load_opponent_model(new_model_path)

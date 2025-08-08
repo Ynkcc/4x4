@@ -10,7 +10,7 @@ from sb3_contrib import MaskablePPO
 # 导入环境和配置
 from game.environment import GameEnvironment, ACTION_SPACE_SIZE
 from utils.constants import EVALUATION_GAMES, EVALUATION_N_ENVS
-from utils.model_compatibility import setup_legacy_imports
+# 【移除】不再需要模型兼容性设置
 
 def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
     """
@@ -31,7 +31,7 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
         # 这种方式更安全，因为它不依赖于任何外部模块的状态。
         class EvaluationAgent:
             def __init__(self, model_path: str):
-                setup_legacy_imports()
+                # 【移除】不再需要模型兼容性设置
                 self.model = MaskablePPO.load(model_path, device='auto')
                 
             def predict(self, observation, action_masks, deterministic=True):
@@ -45,7 +45,7 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
         opponent_agent_for_eval = EvaluationAgent(main_opponent_path)
         
         # 创建一个专门用于评估的向量化环境。
-        setup_legacy_imports()
+        # 【移除】不再需要模型兼容性设置
         eval_env = make_vec_env(
             GameEnvironment,
             n_envs=EVALUATION_N_ENVS,

@@ -25,7 +25,7 @@ from game.environment import (
 )
 from game.policy import CustomActorCriticPolicy
 from training.simple_agent import SimpleAgent
-from utils.scheduler import linear_schedule
+# 【移除】不再需要学习率调度器
 from utils.constants import INITIAL_LR, N_ENVS
 
 class ContinuousTrainer:
@@ -234,7 +234,7 @@ class ContinuousTrainer:
                 model = MaskablePPO(
                     CustomActorCriticPolicy,
                     train_env,
-                    learning_rate=linear_schedule(self.ENHANCED_LR),
+                    learning_rate=self.ENHANCED_LR, # 【修改】直接使用浮点数
                     verbose=1,
                     tensorboard_log=self.LOG_DIR,
                     gamma=0.99,

@@ -4,13 +4,13 @@ import os
 import shutil
 import time
 from stable_baselines3.common.env_util import make_vec_env
-# 【修复】明确导入 SubprocVecEnv 以提高代码清晰度
-from stable_baselines3.common.vec_env import SubprocVecEnv
+# 【修复】明确导入 SubprocVecEnv 和 DummyVecEnv 以提高代码清晰度
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from sb3_contrib import MaskablePPO
 
 # 导入本地模块
 from utils.constants import *
-from utils.scheduler import linear_schedule
+# 【移除】不再需要学习率调度器
 from game.environment import GameEnvironment
 from training.evaluator import evaluate_models
 # 【修复】不再需要 NeuralAgent，因为它的单例模式在多进程下有问题
@@ -66,15 +66,15 @@ class SelfPlayTrainer:
         print(f"创建 {N_ENVS} 个并行的训练环境...")
         print(f"每个环境将自行加载对手模型: {os.path.basename(self.start_model_path)}")
         
-        # 确保 N_ENVS > 1 时使用 SubprocVecEnv
-        vec_env_cls = SubprocVecEnv if N_ENVS > 1 else 'auto'
+        # 确保 N_ENVS > 1 时使用 SubprocVecEnv，N_ENVS = 1 时使用 DummyVecEnv
+        vec_env_cls = SubprocVecEnv if N_ENVS > 1 else DummyVecEnv
         
         self.env = make_vec_env(
             GameEnvironment,
             n_envs=N_ENVS,
             vec_env_cls=vec_env_cls,
             env_kwargs={
-                # 将路径传递给环境的构造函数
+                # 【关键点】将对手模型的路径传递给每个独立的环境进程
                 'opponent_model_path': self.start_model_path
             }
         )
@@ -82,15 +82,19 @@ class SelfPlayTrainer:
         # 2. 加载学习者模型
         print(f"加载学习者模型，它将挑战当前主宰者...")
         
-        from utils.model_compatibility import setup_legacy_imports
-        setup_legacy_imports()
+        # 【移除】不再需要模型兼容性设置
         
         self.model = MaskablePPO.load(
             self.start_model_path,
             env=self.env,
-            learning_rate=linear_schedule(INITIAL_LR), 
+            learning_rate=INITIAL_LR, # 【修改】直接使用常量学习率
             tensorboard_log=TENSORBOARD_LOG_PATH
         )
+        
+        # 【新增】根据用户请求，强制重置训练步数
+        # print("重置模型训练步数...")
+        # self.model.num_timesteps = 0
+        # self.model._total_timesteps = 0
         
         print("✅ 环境和模型准备完成！")
 
@@ -101,7 +105,7 @@ class SelfPlayTrainer:
         print(f"🏋️  阶段一: 学习者进行 {STEPS_PER_LOOP:,} 步训练...")
         self.model.learn(
             total_timesteps=STEPS_PER_LOOP,
-            reset_num_timesteps=False,
+            reset_num_timesteps=False, # 保持False，以便在循环中正确累计步数
             progress_bar=True
         )
 
@@ -115,7 +119,7 @@ class SelfPlayTrainer:
         time.sleep(0.5)
         
         print(f"\n⚔️  阶段三: 启动Elo评估...")
-        # 注意：evaluate_models 内部使用独立的 DummyVecEnv，它的逻辑是正确的，无需修改。
+        # 【逻辑正确】调用独立的评估器，避免与主训练环境冲突
         win_rate = evaluate_models(CHALLENGER_PATH, MAIN_OPPONENT_PATH)
         
         print(f"\n👑 阶段四: 决策...")
@@ -130,12 +134,13 @@ class SelfPlayTrainer:
             # 【核心修正】步骤2: 命令所有并行环境从磁盘重新加载最新的主宰者模型
             print(f"🔥 发送指令，在所有 {N_ENVS} 个并行环境中更新对手模型...")
             try:
-                # 调用在 GameEnvironment 中新增的 `update_opponent` 方法
+                # 【关键点】调用在 GameEnvironment 中定义的 "update_opponent" 方法
+                # 这确保了所有进程中的对手都已更新为新模型
                 self.env.env_method("update_opponent", new_model_path=MAIN_OPPONENT_PATH)
                 print("✅ 所有环境中的对手模型均已更新！")
                 
                 # 【重要】在对手更新后，学习者模型也应该从新的主宰者权重开始下一轮学习，
-                # 而不是继续基于旧的权重。这能确保学习的连续性。
+                # 而不是继续基于旧的权重。这能确保学习的连续性和稳定性。
                 print("🧠 为了学习的连续性，将学习者模型重置为新主宰者的状态...")
                 self.model.load(MAIN_OPPONENT_PATH, env=self.env)
                 

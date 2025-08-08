@@ -286,8 +286,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            from utils.model_compatibility import setup_legacy_imports
-            setup_legacy_imports()
+            # 【移除】不再需要模型兼容性设置
             self.ai_model = MaskablePPO.load(model_path)
             self.ai_status_label.setText("AI状态: 已加载")
             self.log_message(f"成功加载AI模型: {model_path}")
