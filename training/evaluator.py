@@ -8,9 +8,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from sb3_contrib import MaskablePPO
 
 # 导入环境和配置
-from game.environment import GameEnvironment, ACTION_SPACE_SIZE
+from game.environment import GameEnvironment
 from utils.constants import EVALUATION_GAMES, EVALUATION_N_ENVS
 from utils.model_compatibility import setup_legacy_imports
+# 【修改】导入新的 NeuralAgent
+from training.neural_agent import NeuralAgent
 
 def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
     """
@@ -27,6 +29,9 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
     
     eval_env = None
     try:
+        # 【修改】创建 NeuralAgent 实例来作为评估环境中的对手
+        opponent_agent_for_eval = NeuralAgent(model_path=main_opponent_path)
+        
         # 创建一个专门用于评估的向量化环境。
         setup_legacy_imports()
         eval_env = make_vec_env(
@@ -35,7 +40,8 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
             vec_env_cls=DummyVecEnv,
             env_kwargs={
                 'curriculum_stage': 4,
-                'opponent_policy': main_opponent_path
+                # 【修改】将 agent 实例注入环境
+                'opponent_agent': opponent_agent_for_eval
             }
         )
         

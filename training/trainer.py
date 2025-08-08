@@ -9,8 +9,9 @@ from sb3_contrib import MaskablePPO
 from utils.constants import *
 from utils.scheduler import linear_schedule
 from game.environment import GameEnvironment
-from training.manager import SharedOpponentModelManager
 from training.evaluator import evaluate_models
+# 【修改】导入新的 NeuralAgent
+from training.neural_agent import NeuralAgent
 
 class SelfPlayTrainer:
     """
@@ -21,7 +22,8 @@ class SelfPlayTrainer:
         """初始化训练器，设置模型和环境为None。"""
         self.model = None
         self.env = None
-        self.shared_opponent_manager = SharedOpponentModelManager()
+        # 【修改】持有对手 agent 的实例
+        self.opponent_agent = None
         self._setup()
 
     def _setup(self):
@@ -68,16 +70,19 @@ class SelfPlayTrainer:
         准备用于训练的模型和环境。
         """
         print("\n--- [步骤 2/4] 准备环境和模型 ---")
-        # 1. 预加载主宰者模型到共享管理器
-        print(f"加载当前主宰者 '{os.path.basename(self.start_model_path)}' 到共享内存...")
-        self.shared_opponent_manager.load_model(self.start_model_path)
+        # 1. 【修改】创建并初始化对手 Agent (单例)
+        print(f"加载当前主宰者 '{os.path.basename(self.start_model_path)}' 到共享 NeuralAgent...")
+        self.opponent_agent = NeuralAgent(model_path=self.start_model_path)
 
-        # 2. 创建持久化训练环境
+        # 2. 创建持久化训练环境，注入对手 agent
         print(f"创建 {N_ENVS} 个并行的训练环境...")
         self.env = make_vec_env(
             GameEnvironment,
             n_envs=N_ENVS,
-            env_kwargs={'curriculum_stage': 4, 'opponent_policy': self.start_model_path}
+            env_kwargs={
+                'curriculum_stage': 4, 
+                'opponent_agent': self.opponent_agent
+            }
         )
         
         # 3. 加载学习者模型
@@ -127,8 +132,9 @@ class SelfPlayTrainer:
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             shutil.copy(CHALLENGER_PATH, MAIN_OPPONENT_PATH)
-            # 更新共享管理器中的模型，让所有环境在下一轮面对新主宰者
-            self.shared_opponent_manager.load_model(MAIN_OPPONENT_PATH)
+            # 【修改】让共享的对手 agent 重新加载模型，这会更新所有环境的对手
+            print(f"🔥 更新共享 NeuralAgent 以使用新的主宰者模型...")
+            self.opponent_agent.load_model(MAIN_OPPONENT_PATH)
             return True
         else:
             print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者保持不变。")
@@ -145,7 +151,8 @@ class SelfPlayTrainer:
         successful_challenges = 0
         
         for i in range(1, TOTAL_TRAINING_LOOPS + 1):
-            current_opponent_name = os.path.basename(self.shared_opponent_manager.get_model_info()['model_path'])
+            # 【修改】从 agent 获取当前模型信息
+            current_opponent_name = os.path.basename(self.opponent_agent.get_model_path())
             print(f"\n{'='*70}")
             print(f"🔄 训练循环 {i}/{TOTAL_TRAINING_LOOPS} | 当前对手: {current_opponent_name}")
             print(f"{'='*70}")
