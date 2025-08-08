@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("游戏模式:", self.mode_combo)
 
         # AI模型路径
-        self.model_path_edit = QLineEdit("./banqi_ppo_logs/best_model/best_model.zip")
+        self.model_path_edit = QLineEdit("./models/self_play_final/main_opponent.zip")
         self.model_path_edit.setPlaceholderText("输入AI模型文件路径")
         ai_layout.addRow("AI模型路径:", self.model_path_edit)
 
@@ -286,6 +286,8 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            from utils.model_compatibility import setup_legacy_imports
+            setup_legacy_imports()
             self.ai_model = MaskablePPO.load(model_path)
             self.ai_status_label.setText("AI状态: 已加载")
             self.log_message(f"成功加载AI模型: {model_path}")
@@ -459,7 +461,7 @@ class MainWindow(QMainWindow):
 
         try:
             state = self.game.get_state()
-            action_mask = self.valid_action_mask.astype(bool)
+            action_mask = self.valid_action_mask
 
             if not np.any(action_mask):
                 self.log_message("AI发现无棋可走，游戏逻辑应已处理此情况。")
@@ -628,10 +630,9 @@ class MainWindow(QMainWindow):
     def update_bitboard_display(self):
         """更新所有Bitboard的可视化网格。"""
         def vector_to_bitboard(vector):
-            result = 0
             # 使用 numpy 的方式来加速转换
-            powers_of_2 = 1 << np.arange(len(vector))
-            result = np.sum(powers_of_2[vector])
+            powers_of_2 = 1 << np.arange(len(vector), dtype=np.uint64)
+            result = np.sum(powers_of_2[np.where(vector)])
             return int(result)
 
         # 更新基础状态向量

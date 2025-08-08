@@ -33,8 +33,8 @@ INITIAL_LR = 3e-4
 N_ENVS = 8
 
 # --- Elo评估超参数 ---
-# 评估时进行多少局游戏
-EVALUATION_GAMES = 20
+# 评估时进行多少局游戏 (增加到更可靠的数量)
+EVALUATION_GAMES = 100
 # 挑战者胜率需要超过多少才能取代主宰者
 EVALUATION_THRESHOLD = 0.55 
 # 评估时使用的并行环境数量

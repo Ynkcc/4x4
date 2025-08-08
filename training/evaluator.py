@@ -8,16 +8,14 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from sb3_contrib import MaskablePPO
 
 # 导入环境和配置
-from game.environment import GameEnvironment
+from game.environment import GameEnvironment, ACTION_SPACE_SIZE
 from utils.constants import EVALUATION_GAMES, EVALUATION_N_ENVS
 from utils.model_compatibility import setup_legacy_imports
-# 【修改】导入新的 NeuralAgent
-from training.neural_agent import NeuralAgent
 
 def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
     """
     【最终修正版】在一次系列赛中评估挑战者模型对阵主宰者模型的表现。
-    此版本采用了最健壮的动作掩码同步逻辑。
+    此版本采用了最健壮的动作掩码同步逻辑，并避免与训练时的单例冲突。
 
     :param challenger_path: 挑战者模型的 .zip 文件路径。
     :param main_opponent_path: 主宰者（当前最强）模型的 .zip 文件路径。
@@ -29,8 +27,22 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
     
     eval_env = None
     try:
-        # 【修改】创建 NeuralAgent 实例来作为评估环境中的对手
-        opponent_agent_for_eval = NeuralAgent(model_path=main_opponent_path)
+        # 【修正】创建一个完全独立的本地 Agent 类用于评估，避免与训练时的单例发生任何交互。
+        # 这种方式更安全，因为它不依赖于任何外部模块的状态。
+        class EvaluationAgent:
+            def __init__(self, model_path: str):
+                setup_legacy_imports()
+                self.model = MaskablePPO.load(model_path, device='auto')
+                
+            def predict(self, observation, action_masks, deterministic=True):
+                action, _ = self.model.predict(
+                    observation, 
+                    action_masks=action_masks, 
+                    deterministic=deterministic
+                )
+                return int(action), None
+        
+        opponent_agent_for_eval = EvaluationAgent(main_opponent_path)
         
         # 创建一个专门用于评估的向量化环境。
         setup_legacy_imports()
@@ -39,7 +51,7 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
             n_envs=EVALUATION_N_ENVS,
             vec_env_cls=DummyVecEnv,
             env_kwargs={
-                # 【修改】将 agent 实例注入环境
+                # 将本地的评估 agent 实例注入环境
                 'opponent_agent': opponent_agent_for_eval
             }
         )
@@ -59,7 +71,13 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
             # 【最终修正核心】: 不再从 info 字典中解析掩码。
             # 而是每次都在模型预测前，直接从环境中获取与当前 obs 完全同步的掩码。
             # 这是最可靠的方法，能完全避免状态异步问题。
-            action_masks = np.array(eval_env.env_method("action_masks"), dtype=np.int32)
+            try:
+                # 调用每个环境的action_masks方法，不传递参数让环境使用当前玩家
+                action_masks = np.array(eval_env.env_method("action_masks"), dtype=np.int32)
+            except Exception as e:
+                print(f"⚠️ 获取动作掩码失败: {e}")
+                # 如果获取掩码失败，创建一个全为1的掩码作为后备
+                action_masks = np.ones((EVALUATION_N_ENVS, ACTION_SPACE_SIZE), dtype=np.int32)
 
             # 模型为所有并行环境做出决策
             action, _ = challenger_model.predict(obs, action_masks=action_masks, deterministic=True)
