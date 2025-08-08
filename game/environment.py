@@ -6,6 +6,7 @@ from enum import Enum
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+from typing import Optional, Any
 
 # ==============================================================================
 # --- 类型定义与常量 ---
@@ -58,42 +59,20 @@ class GameEnvironment(gym.Env):
     """
     基于Numpy布尔向量的暗棋Gym环境 (支持课程学习)。
     【重要修改】: 状态空间已修改为支持CNN的字典格式。
+    【V2 修改】: 对手模型改为依赖注入模式。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    def __init__(self, render_mode=None, curriculum_stage=4, opponent_policy=None):
+    def __init__(self, render_mode=None, curriculum_stage=4, opponent_agent: Optional[Any] = None):
         super().__init__()
         self.render_mode = render_mode
         self.curriculum_stage = curriculum_stage
         
         # 自我对弈相关属性
         self.learning_player_id = 1  # 学习者始终是玩家1（红方）
-        self.opponent_model = None
         
-        # 【优化】使用共享对手模型管理器，避免重复加载
-        if opponent_policy:
-            try:
-                from training.manager import shared_opponent_manager
-                self.opponent_model = shared_opponent_manager.load_model(opponent_policy)
-                self.opponent_policy_path = opponent_policy
-                self.use_shared_manager = True
-            except ImportError:
-                # 降级到原有方式（保持兼容性）
-                if os.path.exists(opponent_policy):
-                    print(f"环境加载对手策略: {opponent_policy}")
-                    try:
-                        # 设置向后兼容性
-                        from utils.model_compatibility import setup_legacy_imports
-                        setup_legacy_imports()
-                            
-                        from sb3_contrib import MaskablePPO
-                        self.opponent_model = MaskablePPO.load(opponent_policy)
-                    except Exception as e:
-                        print(f"警告：无法加载对手模型 {opponent_policy}: {e}")
-                        self.opponent_model = None
-                self.use_shared_manager = False
-        else:
-            self.use_shared_manager = False
+        # 【V2 修改】直接注入对手 agent 实例
+        self.opponent_agent = opponent_agent
 
         # --- 【重要修改】状态空间定义 ---
         # 状态被分为两部分：棋盘的“图像”表示和全局的“标量”特征
@@ -434,7 +413,8 @@ class GameEnvironment(gym.Env):
         # 3. ---- 进入对手回合 ----
         self.current_player = -self.current_player
 
-        if self.opponent_model is not None:
+        # 【V2 修改】使用注入的 agent 对象
+        if self.opponent_agent is not None:
             opponent_obs = self.get_state()
             # 【变更】使用 self.current_player (现在是对手) 调用 action_masks
             opponent_mask = self.action_masks(self.current_player)
@@ -444,18 +424,13 @@ class GameEnvironment(gym.Env):
                 terminated = True
             else:
                 try:
-                    if self.use_shared_manager:
-                        from training.manager import shared_opponent_manager
-                        opponent_action = shared_opponent_manager.predict_single(
-                            opponent_obs, opponent_mask, deterministic=True
-                        )
-                    else:
-                        opponent_action, _ = self.opponent_model.predict(
-                            opponent_obs, action_masks=opponent_mask, deterministic=True
-                        )
-                    opponent_action = int(opponent_action) if opponent_action is not None else np.random.choice(np.where(opponent_mask)[0])
+                    # 直接调用 agent 的 predict 方法
+                    opponent_action, _ = self.opponent_agent.predict(
+                        opponent_obs, action_masks=opponent_mask, deterministic=True
+                    )
+                    opponent_action = int(opponent_action)
                 except Exception as e:
-                    print(f"警告：对手模型预测失败: {e}。将随机选择一个有效动作。")
+                    print(f"警告：对手 agent 预测失败: {e}。将随机选择一个有效动作。")
                     valid_actions = np.where(opponent_mask)[0]
                     opponent_action = np.random.choice(valid_actions)
                 
