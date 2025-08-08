@@ -80,7 +80,6 @@ class SelfPlayTrainer:
             GameEnvironment,
             n_envs=N_ENVS,
             env_kwargs={
-                'curriculum_stage': 4, 
                 'opponent_agent': self.opponent_agent
             }
         )

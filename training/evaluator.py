@@ -39,7 +39,6 @@ def evaluate_models(challenger_path: str, main_opponent_path: str) -> float:
             n_envs=EVALUATION_N_ENVS,
             vec_env_cls=DummyVecEnv,
             env_kwargs={
-                'curriculum_stage': 4,
                 # 【修改】将 agent 实例注入环境
                 'opponent_agent': opponent_agent_for_eval
             }

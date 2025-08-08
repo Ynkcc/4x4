@@ -129,7 +129,6 @@ class ContinuousTrainer:
                 n_envs=N_ENVS,
                 vec_env_cls=DummyVecEnv,
                 env_kwargs={
-                    'curriculum_stage': 4,
                     'opponent_agent': self.simple_opponent
                 }
             )
@@ -214,7 +213,6 @@ class ContinuousTrainer:
                 n_envs=N_ENVS,
                 vec_env_cls=DummyVecEnv,  # 使用DummyVecEnv避免段错误
                 env_kwargs={
-                    'curriculum_stage': 4,
                     'opponent_agent': self.simple_opponent
                 }
             )

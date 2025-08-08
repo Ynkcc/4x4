@@ -57,16 +57,15 @@ SQ_TO_POS = {sq: (sq // BOARD_COLS, sq % BOARD_COLS) for sq in range(TOTAL_POSIT
 
 class GameEnvironment(gym.Env):
     """
-    基于Numpy布尔向量的暗棋Gym环境 (支持课程学习)。
+    基于Numpy布尔向量的暗棋Gym环境。
     【重要修改】: 状态空间已修改为支持CNN的字典格式。
     【V2 修改】: 对手模型改为依赖注入模式。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    def __init__(self, render_mode=None, curriculum_stage=4, opponent_agent: Optional[Any] = None):
+    def __init__(self, render_mode=None, opponent_agent: Optional[Any] = None):
         super().__init__()
         self.render_mode = render_mode
-        self.curriculum_stage = curriculum_stage
         
         # 自我对弈相关属性
         self.learning_player_id = 1  # 学习者始终是玩家1（红方）
@@ -184,47 +183,21 @@ class GameEnvironment(gym.Env):
                     self.hidden_vector[sq] = True
 
     def _initialize_board(self):
-        """根据课程学习阶段初始化棋盘和所有状态变量。"""
+        """初始化棋盘和所有状态变量为完整游戏布局。"""
         self._reset_all_vectors_and_state()
 
-        # 阶段 1: 吃子入门
-        if self.curriculum_stage == 1:
-            red_chariot = Piece(PieceType.CHARIOT, 1)
-            red_chariot.revealed = True
-            black_soldier = Piece(PieceType.SOLDIER, -1)
-            black_soldier.revealed = True
-            self.board[POS_TO_SQ[(1, 1)]] = red_chariot
-            self.board[POS_TO_SQ[(1, 2)]] = black_soldier
-            self.current_player = 1
-
-        # 阶段 2: 简单战斗 (炮吃子)
-        elif self.curriculum_stage == 2:
-            red_cannon = Piece(PieceType.CANNON, 1)
-            red_cannon.revealed = True
-            red_horse_mount = Piece(PieceType.HORSE, 1)
-            red_horse_mount.revealed = True
-            black_soldier_target = Piece(PieceType.SOLDIER, -1)
-            black_soldier_target.revealed = True
-            self.board[POS_TO_SQ[(0, 0)]] = red_cannon
-            self.board[POS_TO_SQ[(0, 1)]] = red_horse_mount
-            self.board[POS_TO_SQ[(0, 2)]] = black_soldier_target
-            self.current_player = 1
-
-        # 【重要修改】移除阶段3，所有其他情况都视为完整对局
-        # 阶段 4: 完整对局 (原始逻辑)
+        # 初始化完整游戏布局
+        pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
+        if hasattr(self, 'np_random') and self.np_random is not None:
+            self.np_random.shuffle(pieces)
         else:
-            pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
-            if hasattr(self, 'np_random') and self.np_random is not None:
-                self.np_random.shuffle(pieces)
-            else:
-                random.shuffle(pieces)
-            
-            for sq in range(TOTAL_POSITIONS):
-                self.board[sq] = pieces[sq]
-            
-            self.hidden_vector.fill(True)
-            self.empty_vector.fill(False)
-            return
+            random.shuffle(pieces)
+        
+        for sq in range(TOTAL_POSITIONS):
+            self.board[sq] = pieces[sq]
+        
+        self.hidden_vector.fill(True)
+        self.empty_vector.fill(False)
 
         self._update_vectors_from_board()
 
@@ -333,31 +306,6 @@ class GameEnvironment(gym.Env):
             raise ValueError(error_msg)
         
         winner = None
-
-        # 阶段 1 & 2: 目标驱动的短期对局
-        if self.curriculum_stage in [1, 2]:
-            reward = -0.1
-            terminated = False
-            truncated = False
-            
-            if action_index >= REVEAL_ACTIONS_COUNT:
-                from_sq = POS_TO_SQ[coords[0]]
-                to_sq = POS_TO_SQ[coords[1]]
-                
-                if self.board[to_sq] is not None and self.board[to_sq].player == -self.current_player:
-                    reward = 1.0
-                    terminated = True
-                    winner = self.current_player
-                    self._apply_move_action(from_sq, to_sq)
-                else:
-                    self._apply_move_action(from_sq, to_sq)
-            
-            if not terminated and self.move_counter >= 5:
-                truncated = True
-                reward = -1.0
-                winner = 0 # 平局
-
-            return reward, terminated, truncated, winner
 
         # 完整游戏逻辑
         reward = -0.0005
