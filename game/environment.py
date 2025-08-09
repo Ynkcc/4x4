@@ -6,7 +6,7 @@ from enum import Enum
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 
 # 【新增】导入模型类
 try:
@@ -64,27 +64,32 @@ class GameEnvironment(gym.Env):
     """
     基于Numpy布尔向量的暗棋Gym环境。
     【重要修改】: 状态空间已修改为支持CNN的字典格式。
-    【V3 修复】: 对手模型改为在环境内部加载和管理，以支持多进程更新。
+    【V4 修复】: 对手模型改为从一个可动态更新的“对手池”中加载。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    # 【修复】构造函数签名变更：不再接收 agent 对象，而是接收模型路径或一个agent实例(用于评估)
-    def __init__(self, render_mode=None, opponent_model_path: Optional[str] = None, opponent_agent: Optional[Any] = None):
+    # 【修复】构造函数签名变更：接收一个对手池或一个用于评估的agent实例
+    def __init__(self, render_mode=None, opponent_agent: Optional[Any] = None, 
+                 opponent_pool: Optional[List[str]] = None, opponent_weights: Optional[List[float]] = None):
         super().__init__()
         self.render_mode = render_mode
         
         self.learning_player_id = 1  # 学习者始终是玩家1（红方）
         
-        # 【修复】在环境内部维护对手
-        self.opponent_model_path = opponent_model_path
-        self.opponent_model = None
-        self.opponent_agent = opponent_agent # 用于评估时直接注入agent
+        # 【修复】在环境内部维护对手池
+        self.opponent_agent_for_eval = opponent_agent
+        self.opponent_pool = opponent_pool if opponent_pool else []
+        self.opponent_weights = opponent_weights if opponent_weights else []
+        self.loaded_opponents: Dict[str, MaskablePPO] = {}
+        self.active_opponent: Optional[MaskablePPO] = None
 
-        if self.opponent_agent:
-            self.opponent_model = self.opponent_agent
-        elif self.opponent_model_path:
-            self._load_opponent_model(self.opponent_model_path)
-            
+        # 如果是评估模式，直接使用注入的agent
+        if self.opponent_agent_for_eval:
+            self.active_opponent = self.opponent_agent_for_eval
+        # 如果是训练模式（提供了对手池），则加载池中所有模型
+        elif self.opponent_pool:
+            self._load_opponent_pool()
+
         # --- 状态空间定义 (无变化) ---
         num_channels = NUM_PIECE_TYPES * 2 + 2
         board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
@@ -114,29 +119,36 @@ class GameEnvironment(gym.Env):
         self.coords_to_action = {}
         self._initialize_lookup_tables()
 
-    # 【修复】新增：用于加载/重载对手模型的方法
-    def _load_opponent_model(self, model_path: str):
-        """在环境内部加载PPO模型作为对手。"""
+    def _load_opponent_pool(self):
+        """【新增】加载对手池中的所有模型到内存。"""
         if MaskablePPO is None:
             raise ImportError("需要安装 `sb3-contrib` 库来加载对手模型。")
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"环境内错误：找不到对手模型文件: {model_path}")
-        try:
-            # 【移除】不再需要模型兼容性设置
-            self.opponent_model = MaskablePPO.load(model_path, device='cpu') # 在环境中通常使用CPU
-            self.opponent_model_path = model_path
-            # print(f"进程 {os.getpid()}: 已加载对手模型 {os.path.basename(model_path)}")
-        except Exception as e:
-            raise RuntimeError(f"环境内错误：加载对手模型 {model_path} 失败: {e}")
+        
+        self.loaded_opponents.clear()
+        print(f"进程 {os.getpid()}: 正在加载对手池...")
+        for model_path in self.opponent_pool:
+            if not os.path.exists(model_path):
+                print(f"环境内警告：找不到对手模型文件: {model_path}，已跳过。")
+                continue
+            try:
+                self.loaded_opponents[model_path] = MaskablePPO.load(model_path, device='cpu')
+                print(f"进程 {os.getpid()}: 已加载对手 {os.path.basename(model_path)}")
+            except Exception as e:
+                print(f"环境内错误：加载对手模型 {model_path} 失败: {e}")
+        
+        if not self.loaded_opponents:
+            print(f"进程 {os.getpid()}: 警告！对手池为空或所有模型加载失败！")
+
 
     # 【修复】【关键点】暴露给 VecEnv.env_method 的公共接口
-    def update_opponent(self, new_model_path: str):
+    def reload_opponent_pool(self, new_pool: List[str], new_weights: List[float]):
         """
-        公开的方法，用于从外部（例如训练器主进程）更新此环境的对手模型。
-        当 trainer 调用 `env.env_method("update_opponent", ...)` 时，此方法会被执行。
+        【修改】公开的方法，用于从外部（例如训练器主进程）完全更新此环境的对手池。
         """
-        print(f"进程 {os.getpid()}: 收到指令，正在更新对手模型为 {os.path.basename(new_model_path)}...")
-        self._load_opponent_model(new_model_path)
+        print(f"进程 {os.getpid()}: 收到指令，正在更新对手池...")
+        self.opponent_pool = new_pool
+        self.opponent_weights = new_weights
+        self._load_opponent_pool() # 重新加载所有模型
         return True # 返回确认信号
 
     def step(self, action_index):
@@ -152,7 +164,7 @@ class GameEnvironment(gym.Env):
         self.current_player = -self.current_player
 
         # 【修复】使用环境内部加载的对手模型
-        if self.opponent_model is not None:
+        if self.active_opponent is not None:
             opponent_obs = self.get_state()
             opponent_mask = self.action_masks(self.current_player)
 
@@ -161,8 +173,8 @@ class GameEnvironment(gym.Env):
                 terminated = True
             else:
                 try:
-                    # 直接调用内部模型的 predict 方法
-                    opponent_action, _ = self.opponent_model.predict(
+                    # 直接调用激活的对手模型的 predict 方法
+                    opponent_action, _ = self.active_opponent.predict(
                         opponent_obs, action_masks=opponent_mask, deterministic=True
                     )
                     opponent_action = int(opponent_action)
@@ -282,7 +294,31 @@ class GameEnvironment(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+
+        # 【核心修改】在每局游戏开始时，从池中选择一个对手
+        if self.loaded_opponents:
+            # 确保有可用的模型路径和权重
+            valid_pool_paths = [p for p in self.opponent_pool if p in self.loaded_opponents]
+            if valid_pool_paths:
+                # 重新计算有效模型的权重
+                valid_weights = [self.opponent_weights[self.opponent_pool.index(p)] for p in valid_pool_paths]
+                normalized_weights = np.array(valid_weights) / np.sum(valid_weights)
+                
+                # 根据权重随机选择一个模型路径
+                chosen_path = self.np_random.choice(valid_pool_paths, p=normalized_weights)
+                # 设置为本局的激活对手
+                self.active_opponent = self.loaded_opponents[chosen_path]
+            else:
+                self.active_opponent = None # 如果没有有效模型，则无对手
+        
+        elif not self.opponent_agent_for_eval:
+             # 如果不是评估模式，也没有对手池，就发出警告
+             print(f"进程 {os.getpid()}: 警告 - 没有提供评估Agent，也没有配置对手池。将进行无对手模式。")
+             self.active_opponent = None
+
+        # 初始化棋盘
         self._initialize_board()
+        
         info = {'action_mask': self.action_masks(self.current_player), 'winner': None}
         return self.get_state(), info
     
@@ -552,4 +588,7 @@ class GameEnvironment(gym.Env):
         return state_str
 
     def close(self):
+        # 清理加载的模型
+        self.loaded_opponents.clear()
+        self.active_opponent = None
         pass
