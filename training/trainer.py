@@ -87,14 +87,15 @@ class SelfPlayTrainer:
         self.model = MaskablePPO.load(
             self.start_model_path,
             env=self.env,
+            n_epochs=15,
             learning_rate=INITIAL_LR, # 【修改】直接使用常量学习率
             tensorboard_log=TENSORBOARD_LOG_PATH
         )
         
         # 【新增】根据用户请求，强制重置训练步数
-        # print("重置模型训练步数...")
-        # self.model.num_timesteps = 0
-        # self.model._total_timesteps = 0
+        print("重置模型训练步数...")
+        self.model.num_timesteps = 0
+        self.model._total_timesteps = 0
         
         print("✅ 环境和模型准备完成！")
 

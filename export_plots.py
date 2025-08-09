@@ -24,10 +24,10 @@ chinese_fonts = [
 available_fonts = [f.name for f in fm.fontManager.ttflist]
 font_found = False
 
-print("可用字体中包含的中文字体:")
-for font_name in available_fonts:
-    if any(cjk in font_name.lower() for cjk in ['noto', 'cjk', 'wqy', 'micro', 'hei']):
-        print(f"  - {font_name}")
+# print("可用字体中包含的中文字体:")
+# for font_name in available_fonts:
+#     if any(cjk in font_name.lower() for cjk in ['noto', 'cjk', 'wqy', 'micro', 'hei']):
+#         print(f"  - {font_name}")
 
 for font in chinese_fonts:
     if font in available_fonts or font == 'sans-serif':
@@ -47,7 +47,7 @@ plt.rcParams['axes.unicode_minus'] = False
 # --- 配置 ---
 # 1. 设置你的 TensorBoard 日志目录 (与你的模型训练配置一致)
 #    这个路径是相对于你运行此脚本的位置的。
-log_dir = "./tensorboard_logs/continuous_train/"
+log_dir = "./tensorboard_logs/self_play_final/"
 
 # 2. 设置保存图像的输出目录
 output_dir = "./training_plots/"
@@ -63,7 +63,7 @@ tags_to_plot = [
     "train/value_loss",
     "rollout/ep_len_mean",
     "rollout/ep_rew_mean",
-    "time/fps"
+    "train/explained_variance"
 ]
 
 # --- 脚本执行 ---
