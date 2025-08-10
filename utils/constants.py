@@ -14,6 +14,9 @@ SELF_PLAY_MODEL_PATH = os.path.join(ROOT_DIR, "self_play_models", "final_selfpla
 # 本次训练的输出目录
 SELF_PLAY_OUTPUT_DIR = os.path.join(ROOT_DIR, "models", "self_play_final")
 
+# 【新增】对手池专用目录
+OPPONENT_POOL_DIR = os.path.join(SELF_PLAY_OUTPUT_DIR, "opponent_pool")
+
 # Elo评估中使用的模型路径
 MAIN_OPPONENT_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "main_opponent.zip")
 CHALLENGER_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "challenger.zip")
@@ -31,6 +34,9 @@ STEPS_PER_LOOP = 16384
 INITIAL_LR = 3e-5 
 # 并行环境数量
 N_ENVS = 8
+
+# 【新增】对手池最大容量
+MAX_OPPONENT_POOL_SIZE = 20
 
 # --- Elo评估超参数 ---
 # 评估时进行多少局游戏 (增加到更可靠的数量)

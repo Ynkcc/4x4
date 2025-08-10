@@ -32,3 +32,4 @@ banqi_numpy_ppo_logs
 training_plots
 self_play_tensorboard_logs_optimized
 tensorboard_logs
+models

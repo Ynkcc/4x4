@@ -314,7 +314,7 @@ class GameEnvironment(gym.Env):
         
         elif not self.opponent_agent_for_eval:
              # 如果不是评估模式，也没有对手池，就发出警告
-             print(f"进程 {os.getpid()}: 警告 - 没有提供评估Agent，也没有配置对手池。将进行无对手模式。")
+             #print(f"进程 {os.getpid()}: 警告 - 没有提供评估Agent，也没有配置对手池。将进行无对手模式。")
              self.active_opponent = None
 
         # 初始化棋盘
