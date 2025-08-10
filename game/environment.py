@@ -70,7 +70,8 @@ class GameEnvironment(gym.Env):
 
     # 【修复】构造函数签名变更：接收一个对手池或一个用于评估的agent实例
     def __init__(self, render_mode=None, opponent_agent: Optional[Any] = None, 
-                 opponent_pool: Optional[List[str]] = None, opponent_weights: Optional[List[float]] = None):
+                 opponent_pool: Optional[List[str]] = None, opponent_weights: Optional[List[float]] = None,
+                 shaping_coef: float = 0.02):
         super().__init__()
         self.render_mode = render_mode
         
@@ -80,8 +81,11 @@ class GameEnvironment(gym.Env):
         self.opponent_agent_for_eval = opponent_agent
         self.opponent_pool = opponent_pool if opponent_pool else []
         self.opponent_weights = opponent_weights if opponent_weights else []
-        self.loaded_opponents: Dict[str, MaskablePPO] = {}
-        self.active_opponent: Optional[MaskablePPO] = None
+        self.loaded_opponents: Dict[str, Any] = {}
+        self.active_opponent: Optional[Any] = None
+
+        # 【新增】势函数差分塑形系数（<=0 则关闭塑形）
+        self.shaping_coef = float(shaping_coef)
 
         # 如果是评估模式，直接使用注入的agent
         if self.opponent_agent_for_eval:
@@ -152,13 +156,24 @@ class GameEnvironment(gym.Env):
         return True # 返回确认信号
 
     def step(self, action_index):
+        # 【新增-塑形】对手一手可威胁到学习者（红方）的价值（行动前）
+        prev_threat = 0.0
+        if self.shaping_coef > 0.0:
+            prev_threat = self._one_step_threat_value_against(self.learning_player_id)
+
         # 1. 应用学习者的动作
         reward, terminated, truncated, winner = self._internal_apply_action(action_index)
 
-        # 2. 如果学习者的动作直接结束游戏，准备信息并返回
+        # 2. 如果学习者的动作直接结束游戏，准备信息并返回（不做塑形，以免污染终局奖励）
         if terminated or truncated:
             info = {'winner': winner, 'action_mask': self.action_masks(self.current_player)}
             return self.get_state(), np.float32(reward), terminated, truncated, info
+
+        # 【新增-塑形】学习者动作后，重新评估对手一手威胁并按差分调整奖励
+        if self.shaping_coef > 0.0:
+            new_threat = self._one_step_threat_value_against(self.learning_player_id)
+            denom = WINNING_SCORE if WINNING_SCORE > 0 else 1.0
+            reward += self.shaping_coef * (prev_threat - new_threat) / denom
 
         # 3. ---- 进入对手回合 ----
         self.current_player = -self.current_player
@@ -532,6 +547,37 @@ class GameEnvironment(gym.Env):
                         if action_index is not None:
                             action_mask[action_index] = 1
         return action_mask
+
+    # 【新增】势函数：对手“一步内可吃到 player 棋子”的总价值（去重）。用于差分塑形。
+    def _one_step_threat_value_against(self, player: int) -> float:
+        if ACTION_SPACE_SIZE <= REVEAL_ACTIONS_COUNT:
+            return 0.0
+        mask = self.action_masks(-player)
+        if mask is None or np.sum(mask) == 0:
+            return 0.0
+        threatened_squares = set()
+        total_value = 0.0
+        # 仅统计移动/攻击动作（排除翻子）
+        move_indices = np.where(mask)[0]
+        for idx in move_indices:
+            if idx < REVEAL_ACTIONS_COUNT:
+                continue
+            coords = self.action_to_coords.get(int(idx))
+            if not coords:
+                continue
+            # coords 形如 ((r1,c1),(r2,c2))
+            to_pos = coords[1]
+            to_sq = POS_TO_SQ[to_pos]
+            piece = self.board[to_sq]
+            if piece is None:
+                continue
+            if piece.player != player:
+                continue
+            if to_sq in threatened_squares:
+                continue
+            threatened_squares.add(to_sq)
+            total_value += float(PIECE_VALUES[piece.piece_type])
+        return total_value
 
     def render(self):
         if self.render_mode != 'human': return
