@@ -180,11 +180,12 @@ class SelfPlayTrainer:
         self.model = MaskablePPO.load(
             learner_start_path,
             env=self.env,
-            n_epochs=15,
+            n_steps=512,
             learning_rate=INITIAL_LR,
             tensorboard_log=TENSORBOARD_LOG_PATH
         )
         
+        # 注释掉重置步数，保持训练统计信息的连续性
         print("重置模型初始训练步数...")
         self.model.num_timesteps = 0
         self.model._total_timesteps = 0
@@ -235,12 +236,23 @@ class SelfPlayTrainer:
                 
                 # 步骤4: 将学习者模型重置为新主宰者的状态
                 print("🧠 为了学习的连续性，将学习者模型重置为新主宰者的状态...")
-                self.model.load(MAIN_OPPONENT_PATH, env=self.env)
+                # ...existing code...
+                old_model = self.model
+                new_model = MaskablePPO.load(MAIN_OPPONENT_PATH, env=self.env)
+                # 迁移日志与步数，确保训练与可视化连续
+                if hasattr(old_model, "logger") and hasattr(new_model, "set_logger"):
+                    new_model.set_logger(old_model.logger)
+                new_model.num_timesteps = getattr(old_model, "num_timesteps", 0)
+                if hasattr(old_model, "_total_timesteps"):
+                    new_model._total_timesteps = old_model._total_timesteps
+                self.model = new_model
+                # ...existing code...
                 
-                # 【核心修改】步骤5: 重置训练步数
-                print("🔄 一个新时代开始，重置训练步数...")
-                self.model.num_timesteps = 0
-                self.model._total_timesteps = 0
+                # 【核心修改】步骤5: 注释掉重置训练步数，保持TensorBoard日志连续性
+                # 重置步数会导致训练指标丢失，影响训练过程的监控
+                # print("🔄 一个新时代开始，重置训练步数...")
+                # self.model.num_timesteps = 0
+                # self.model._total_timesteps = 0
 
                 return True
             except Exception as e:
