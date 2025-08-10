@@ -172,7 +172,7 @@ def evaluate_mirrored_matches(model1_path: str, model2_path: str, num_groups: in
 if __name__ == '__main__':
     # --- 在此配置您要评估的模型路径 ---
     MODEL_A_PATH = "./models/self_play_final/main_opponent.zip"
-    MODEL_B_PATH = "./models/continuous_train/best_model_session_1.zip"
+    MODEL_B_PATH = "./models/self_play_final/opponent1.zip"
     
     # --- 配置对局组数 ---
     NUM_EVALUATION_GROUPS = 100

@@ -48,7 +48,7 @@ REGULAR_MOVE_ACTIONS_COUNT = 48
 CANNON_ATTACK_ACTIONS_COUNT = 48
 ACTION_SPACE_SIZE = REVEAL_ACTIONS_COUNT + REGULAR_MOVE_ACTIONS_COUNT + CANNON_ATTACK_ACTIONS_COUNT # 112
 
-MAX_CONSECUTIVE_MOVES = 40
+MAX_CONSECUTIVE_MOVES = 12
 WINNING_SCORE = 60
 
 # --- 棋子属性 (无变化) ---
@@ -70,8 +70,7 @@ class GameEnvironment(gym.Env):
 
     # 【修复】构造函数签名变更：接收一个对手池或一个用于评估的agent实例
     def __init__(self, render_mode=None, opponent_agent: Optional[Any] = None, 
-                 opponent_pool: Optional[List[str]] = None, opponent_weights: Optional[List[float]] = None,
-                 shaping_coef: float = 0.02):
+                 opponent_pool: Optional[List[str]] = None, opponent_weights: Optional[List[float]] = None):
         super().__init__()
         self.render_mode = render_mode
         
@@ -84,9 +83,6 @@ class GameEnvironment(gym.Env):
         self.loaded_opponents: Dict[str, Any] = {}
         self.active_opponent: Optional[Any] = None
 
-        # 【新增】势函数差分塑形系数（<=0 则关闭塑形）
-        self.shaping_coef = float(shaping_coef)
-
         # 如果是评估模式，直接使用注入的agent
         if self.opponent_agent_for_eval:
             self.active_opponent = self.opponent_agent_for_eval
@@ -97,7 +93,7 @@ class GameEnvironment(gym.Env):
         # --- 状态空间定义 (无变化) ---
         num_channels = NUM_PIECE_TYPES * 2 + 2
         board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
-        scalar_shape = (3 + 8 + 8,)
+        scalar_shape = (3 + 8 + 8,)  # 基础标量特征：我的得分、对手得分、连续未吃子步数
 
         self.observation_space = spaces.Dict({
             "board": spaces.Box(low=0.0, high=1.0, shape=board_shape, dtype=np.float32),
@@ -116,6 +112,7 @@ class GameEnvironment(gym.Env):
         self.dead_pieces = {-1: [], 1: []}
         self.current_player = 1
         self.move_counter = 0
+        self.total_step_counter = 0  # 新增：总步数计数器，用于强制截断
         self.scores = {-1: 0, 1: 0}
 
         self.attack_tables = {}
@@ -156,29 +153,17 @@ class GameEnvironment(gym.Env):
         return True # 返回确认信号
 
     def step(self, action_index):
-        # 【新增-塑形】对手一手可威胁到学习者（红方）的价值（行动前）
-        prev_threat = 0.0
-        if self.shaping_coef > 0.0:
-            prev_threat = self._one_step_threat_value_against(self.learning_player_id)
-
         # 1. 应用学习者的动作
         reward, terminated, truncated, winner = self._internal_apply_action(action_index)
 
-        # 2. 如果学习者的动作直接结束游戏，准备信息并返回（不做塑形，以免污染终局奖励）
+        # 2. 如果学习者的动作直接结束游戏，准备信息并返回
         if terminated or truncated:
             info = {'winner': winner, 'action_mask': self.action_masks(self.current_player)}
             return self.get_state(), np.float32(reward), terminated, truncated, info
 
-        # 【新增-塑形】学习者动作后，重新评估对手一手威胁并按差分调整奖励
-        if self.shaping_coef > 0.0:
-            new_threat = self._one_step_threat_value_against(self.learning_player_id)
-            denom = WINNING_SCORE if WINNING_SCORE > 0 else 1.0
-            reward += self.shaping_coef * (prev_threat - new_threat) / denom
-
         # 3. ---- 进入对手回合 ----
         self.current_player = -self.current_player
 
-        # 【修复】使用环境内部加载的对手模型
         if self.active_opponent is not None:
             opponent_obs = self.get_state()
             opponent_mask = self.action_masks(self.current_player)
@@ -188,7 +173,6 @@ class GameEnvironment(gym.Env):
                 terminated = True
             else:
                 try:
-                    # 直接调用激活的对手模型的 predict 方法
                     opponent_action, _ = self.active_opponent.predict(
                         opponent_obs, action_masks=opponent_mask, deterministic=True
                     )
@@ -198,6 +182,7 @@ class GameEnvironment(gym.Env):
                     valid_actions = np.where(opponent_mask)[0]
                     opponent_action = np.random.choice(valid_actions)
                 
+                # 对手的奖励会从学习者的总奖励中扣除
                 opponent_reward, terminated, truncated, winner = self._internal_apply_action(opponent_action)
                 reward -= opponent_reward
 
@@ -274,6 +259,7 @@ class GameEnvironment(gym.Env):
         self.dead_pieces = {-1: [], 1: []}
         self.current_player = 1
         self.move_counter = 0
+        self.total_step_counter = 0  # 重置总步数计数器
         self.scores = {-1: 0, 1: 0}
 
     def _update_vectors_from_board(self):
@@ -407,8 +393,12 @@ class GameEnvironment(gym.Env):
             )
             raise ValueError(error_msg)
         
+        # 增加总步数计数
+        self.total_step_counter += 1
+        
         winner = None
-        reward = -0.0005
+        # --- 核心修改：将中间奖励设为0 ---
+        reward = 0.0
         
         if action_index < REVEAL_ACTIONS_COUNT:
             from_sq = POS_TO_SQ[coords]
@@ -417,11 +407,12 @@ class GameEnvironment(gym.Env):
         else:
             from_sq = POS_TO_SQ[coords[0]]
             to_sq = POS_TO_SQ[coords[1]]
-            raw_reward = self._apply_move_action(from_sq, to_sq)
-            reward += raw_reward / WINNING_SCORE if WINNING_SCORE > 0 else raw_reward
+            # 此函数仅更新游戏状态（如分数），不再返回用于学习的奖励值
+            self._apply_move_action(from_sq, to_sq)
         
         terminated, truncated = False, False
         
+        # --- 游戏结束条件判断 ---
         if self.scores[1] >= WINNING_SCORE:
             winner, terminated = 1, True
         elif self.scores[-1] >= WINNING_SCORE:
@@ -434,16 +425,25 @@ class GameEnvironment(gym.Env):
             winner = self.current_player
             terminated = True
 
+        # 连续未吃子达到上限 - 这是正常的游戏结束条件（平局）
         if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES:
-            winner, truncated = 0, True
+            winner, terminated = 0, True  # 平局，正常结束
 
+        # 总步数超过100步 - 强制截断
+        if not terminated and not truncated and self.total_step_counter >= 100:
+            winner, truncated = 0, True  # 平局，但是截断
+
+        # --- 核心修改：仅在游戏结束时分配最终奖励 ---
         if terminated:
             if winner == self.current_player:
-                reward += 1.0
+                reward = 1.0
             elif winner == -self.current_player:
-                reward -= 1.0
+                reward = -1.0
+            else: # 平局（包括连续未吃子导致的平局）
+                reward = 0.0 
         elif truncated:
-            reward -= 0.5
+            # 因总步数超限强制截断，给予负向奖励
+            reward = -0.5
 
         return reward, terminated, truncated, winner
 
@@ -461,7 +461,8 @@ class GameEnvironment(gym.Env):
         defender = self.board[to_sq]
         if attacker is None or not attacker.revealed:
             raise ValueError(f"错误：试图从 {from_sq} 移动空或未翻开的棋子")
-        reward = 0.0
+        
+        # 移动到空位
         if defender is None:
             self.board[to_sq], self.board[from_sq] = attacker, None
             self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
@@ -471,15 +472,19 @@ class GameEnvironment(gym.Env):
             self.empty_vector[from_sq] = True
             self.empty_vector[to_sq] = False
             self.move_counter += 1
-            return 0.0
+            return # 无奖励返回
+        
+        # 吃子
         points = PIECE_VALUES[defender.piece_type]
         is_cannon_attack = attacker.piece_type == PieceType.CANNON
+        
+        # 炮翻山吃己方棋子是给对方加分
         if is_cannon_attack and attacker.player == defender.player:
             self.scores[-attacker.player] += points
-            reward = -float(points)
         else:
             self.scores[attacker.player] += points
-            reward = float(points)
+            
+        # 更新向量
         self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
         self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
         self.revealed_vectors[attacker.player][from_sq] = False
@@ -492,8 +497,8 @@ class GameEnvironment(gym.Env):
         self.empty_vector[from_sq] = True
         self.dead_pieces[defender.player].append(defender)
         self.board[to_sq], self.board[from_sq] = attacker, None
-        self.move_counter = 0
-        return reward
+        self.move_counter = 0 # 发生吃子，计数器重置
+        return # 无奖励返回
 
     def action_masks(self, player_id: int = None):
         action_mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
@@ -548,37 +553,6 @@ class GameEnvironment(gym.Env):
                             action_mask[action_index] = 1
         return action_mask
 
-    # 【新增】势函数：对手“一步内可吃到 player 棋子”的总价值（去重）。用于差分塑形。
-    def _one_step_threat_value_against(self, player: int) -> float:
-        if ACTION_SPACE_SIZE <= REVEAL_ACTIONS_COUNT:
-            return 0.0
-        mask = self.action_masks(-player)
-        if mask is None or np.sum(mask) == 0:
-            return 0.0
-        threatened_squares = set()
-        total_value = 0.0
-        # 仅统计移动/攻击动作（排除翻子）
-        move_indices = np.where(mask)[0]
-        for idx in move_indices:
-            if idx < REVEAL_ACTIONS_COUNT:
-                continue
-            coords = self.action_to_coords.get(int(idx))
-            if not coords:
-                continue
-            # coords 形如 ((r1,c1),(r2,c2))
-            to_pos = coords[1]
-            to_sq = POS_TO_SQ[to_pos]
-            piece = self.board[to_sq]
-            if piece is None:
-                continue
-            if piece.player != player:
-                continue
-            if to_sq in threatened_squares:
-                continue
-            threatened_squares.add(to_sq)
-            total_value += float(PIECE_VALUES[piece.piece_type])
-        return total_value
-
     def render(self):
         if self.render_mode != 'human': return
         red_map = {p: c for p, c in zip(PieceType, "兵炮马俥相仕帥")}
@@ -629,6 +603,7 @@ class GameEnvironment(gym.Env):
             f"核心状态:\n"
             f"  - 当前玩家: {'红方(1)' if self.current_player == 1 else '黑方(-1)'}\n"
             f"  - 连续未吃子步数: {self.move_counter}\n"
+            f"  - 总步数: {self.total_step_counter}\n"
             f"  - 得分 (红/黑): {self.scores[1]} / {self.scores[-1]}\n"
         )
         return state_str
