@@ -10,7 +10,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from sb3_contrib import MaskablePPO
 
-# 导入本地模块
+# 【更新】导入所有需要的常量
 from utils.constants import *
 from game.environment import GameEnvironment
 from training.evaluator import evaluate_models # 使用镜像评估器
@@ -31,8 +31,9 @@ class SelfPlayTrainer:
 
         # Elo评分系统
         self.elo_ratings = {}
-        self.default_elo = 1200
-        self.elo_k_factor = 32 # Elo评分更新的K因子
+        # 【更新】使用常量初始化Elo参数
+        self.default_elo = ELO_DEFAULT
+        self.elo_k_factor = ELO_K_FACTOR
         
         self._setup()
 
@@ -60,7 +61,7 @@ class SelfPlayTrainer:
             shutil.copy(initial_model_found, MAIN_OPPONENT_PATH)
             print(f"已将初始模型复制为第一个主宰者: {MAIN_OPPONENT_PATH}")
             
-            # 【新增】将初始主宰者也加入对手池，作为第一个对手
+            # 将初始主宰者也加入对手池，作为第一个对手
             initial_opponent_path = os.path.join(OPPONENT_POOL_DIR, "opponent_0.zip")
             if not os.path.exists(initial_opponent_path):
                  shutil.copy(initial_model_found, initial_opponent_path)
@@ -77,7 +78,6 @@ class SelfPlayTrainer:
         print("正在从磁盘加载对手池和Elo评分...")
         self.opponent_pool_paths = []
         
-        # 【修改】Elo文件路径应在SELF_PLAY_OUTPUT_DIR下，与模型同级
         elo_file = os.path.join(SELF_PLAY_OUTPUT_DIR, "elo_ratings.json")
         if os.path.exists(elo_file):
             try:
@@ -110,16 +110,13 @@ class SelfPlayTrainer:
 
     def _update_elo(self, winner_name, loser_name, win_rate):
         """
-        【重写】根据镜像对局的实际胜率更新双方的Elo评分。
+        根据镜像对局的实际胜率更新双方的Elo评分。
         """
         winner_elo = self.elo_ratings.get(winner_name, self.default_elo)
         loser_elo = self.elo_ratings.get(loser_name, self.default_elo)
 
-        # 计算预期胜率
         expected_win = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
         
-        # 使用实际胜率 `win_rate` 作为得分 (S_A)
-        # S_B = 1 - S_A
         new_winner_elo = winner_elo + self.elo_k_factor * (win_rate - expected_win)
         new_loser_elo = loser_elo - self.elo_k_factor * (win_rate - expected_win)
         
@@ -129,7 +126,6 @@ class SelfPlayTrainer:
         print(f"Elo 更新 (基于胜率 {win_rate:.2%}):")
         print(f"  - {winner_name}: {winner_elo:.0f} -> {new_winner_elo:.0f} (Δ {new_winner_elo - winner_elo:+.1f})")
         print(f"  - {loser_name}: {loser_elo:.0f} -> {new_loser_elo:.0f} (Δ {new_loser_elo - loser_elo:+.1f})")
-
 
     def _update_opponent_weights(self):
         """
@@ -151,8 +147,8 @@ class SelfPlayTrainer:
             opp_name = os.path.basename(path)
             opp_elo = self.elo_ratings.get(opp_name, self.default_elo)
             elo_diff = abs(main_elo - opp_elo)
-            temperature = 100 
-            weight = np.exp(-elo_diff / temperature)
+            # 【更新】使用常量设置温度参数
+            weight = np.exp(-elo_diff / ELO_WEIGHT_TEMPERATURE)
             weights.append(weight)
         
         main_opponent_weight = sum(weights) * 0.5 if weights else 1.0
@@ -174,11 +170,11 @@ class SelfPlayTrainer:
 
     def _add_new_opponent(self, challenger_elo):
         """
-        【重写】挑战成功后，执行“主宰者降级入池 -> 挑战者晋升为主宰者 -> 池大小管理”的完整流程。
+        挑战成功后，执行“主宰者降级入池 -> 挑战者晋升为主宰者 -> 池大小管理”的完整流程。
         """
         print("🔄 正在执行对手池轮换...")
 
-        # 1. 确定新对手的文件名 (基于当前池中最大编号)
+        # 1. 确定新对手的文件名
         opponent_files = [f for f in os.listdir(OPPONENT_POOL_DIR) if f.endswith('.zip')]
         max_num = -1
         for f in opponent_files:
@@ -193,7 +189,6 @@ class SelfPlayTrainer:
         old_main_name = "main_opponent.zip"
         if os.path.exists(MAIN_OPPONENT_PATH):
             shutil.copy(MAIN_OPPONENT_PATH, new_opponent_path)
-            # 继承旧主宰者的Elo
             self.elo_ratings[new_opponent_name] = self.elo_ratings.get(old_main_name, self.default_elo)
             self.opponent_pool_paths.append(new_opponent_path)
             print(f"旧主宰者已存入对手池: {new_opponent_name} (Elo: {self.elo_ratings[new_opponent_name]:.0f})")
@@ -264,33 +259,27 @@ class SelfPlayTrainer:
 
     def _evaluate_and_update(self, loop_number: int) -> bool:
         """
-        【重写】评估、决策、更新Elo、轮换对手、同步环境的完整流程。
+        评估、决策、更新Elo、轮换对手、同步环境的完整流程。
         """
         print(f"\n💾 阶段二: 保存学习者为挑战者模型 -> {os.path.basename(CHALLENGER_PATH)}")
         self.model.save(CHALLENGER_PATH)
-        time.sleep(0.5) # 等待文件系统完成写入
+        time.sleep(0.5)
         
         print(f"\n⚔️  阶段三: 启动镜像对局评估...")
         win_rate = evaluate_models(CHALLENGER_PATH, MAIN_OPPONENT_PATH)
         
         print(f"\n👑 阶段四: 决策...")
-        challenger_name = "challenger_temp" # 使用一个临时键来存储挑战者的Elo
+        challenger_name = "challenger_temp"
         main_opponent_name = "main_opponent.zip"
         
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
-            # 1. 更新双方Elo
             self._update_elo(challenger_name, main_opponent_name, win_rate)
-            
-            # 2. 执行对手池轮换
             challenger_final_elo = self.elo_ratings.pop(challenger_name)
             self._add_new_opponent(challenger_final_elo)
-            
-            # 3. 重新计算采样权重
             self._update_opponent_weights()
             
-            # 4. 命令所有并行环境重新加载新的对手池
             print(f"🔥 发送指令，在所有 {N_ENVS} 个并行环境中更新对手池...")
             try:
                 results = self.env.env_method(
@@ -303,29 +292,26 @@ class SelfPlayTrainer:
                 else:
                     print("⚠️ 部分环境未能成功更新对手池。")
 
-                # 5. 重置学习者模型为新主宰者的状态，以保证学习的连续性
                 print("🧠 正在将学习者重置为新主宰者的状态...")
-                # 保留旧模型的日志记录器和总步数，以确保TensorBoard图表连续
                 old_logger = self.model.logger
                 old_total_timesteps = self.model._total_timesteps
                 
                 self.model = MaskablePPO.load(MAIN_OPPONENT_PATH, env=self.env)
                 
                 self.model.set_logger(old_logger)
-                self.model.num_timesteps = 0 # 每个循环的步数重新开始计算
-                self.model._total_timesteps = old_total_timesteps # 但总步数保持连续
+                self.model.num_timesteps = 0
+                self.model._total_timesteps = old_total_timesteps
                 
                 return True
 
             except Exception as e:
                 raise RuntimeError(f"在更新并行环境中的对手池时发生严重错误: {e}")
 
-        else: # 挑战失败
+        else:
             print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者与对手池保持不变。")
-            # 即使失败，也要更新Elo。此时主宰者是胜利方，其“胜率”为 1.0 - win_rate
             self._update_elo(main_opponent_name, challenger_name, 1.0 - win_rate)
-            self.elo_ratings.pop(challenger_name) # 移除临时记录
-            self._save_elo_ratings() # 保存Elo更新
+            self.elo_ratings.pop(challenger_name)
+            self._save_elo_ratings()
             return False
 
     def run(self):

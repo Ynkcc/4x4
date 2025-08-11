@@ -14,7 +14,7 @@ SELF_PLAY_MODEL_PATH = os.path.join(ROOT_DIR, "self_play_models", "final_selfpla
 # 本次训练的输出目录
 SELF_PLAY_OUTPUT_DIR = os.path.join(ROOT_DIR, "models", "self_play_final")
 
-# 【新增】对手池专用目录
+# 对手池专用目录
 OPPONENT_POOL_DIR = os.path.join(SELF_PLAY_OUTPUT_DIR, "opponent_pool")
 
 # Elo评估中使用的模型路径
@@ -24,6 +24,7 @@ FINAL_MODEL_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "final_model.zip")
 
 # TensorBoard 日志路径
 TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_final")
+
 
 # --- 训练超参数 ---
 # 总共进行多少次 "训练 -> 评估" 的循环
@@ -35,13 +36,22 @@ INITIAL_LR = 3e-5
 # 并行环境数量
 N_ENVS = 8
 
-# 【新增】对手池最大容量
-MAX_OPPONENT_POOL_SIZE = 20
 
-# --- Elo评估超参数 ---
-# 评估时进行多少局游戏 (增加到更可靠的数量)
+# --- 对手池与Elo系统超参数 ---
+# 对手池最大容量
+MAX_OPPONENT_POOL_SIZE = 20
+# Elo 默认初始值
+ELO_DEFAULT = 1200
+# Elo K因子 (用于更新评分)
+ELO_K_FACTOR = 32
+# Elo 权重计算的温度参数，用于决定与主宰者Elo差距多大的对手被选中的概率
+ELO_WEIGHT_TEMPERATURE = 100
+
+
+# --- 评估超参数 ---
+# 评估时进行多少局游戏 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 100
 # 挑战者胜率需要超过多少才能取代主宰者
 EVALUATION_THRESHOLD = 0.55 
-# 评估时使用的并行环境数量
+# 评估时使用的并行环境数量 (评估时通常用1个)
 EVALUATION_N_ENVS = 1
