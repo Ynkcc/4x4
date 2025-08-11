@@ -28,7 +28,7 @@ TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_fin
 
 # --- 训练超参数 ---
 # 总共进行多少次 "训练 -> 评估" 的循环
-TOTAL_TRAINING_LOOPS = 500
+TOTAL_TRAINING_LOOPS = 1000
 # 在每次评估之间，学习者训练多少步
 STEPS_PER_LOOP = 16384
 # 初始学习率

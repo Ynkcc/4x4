@@ -242,9 +242,9 @@ class SelfPlayTrainer:
             tensorboard_log=TENSORBOARD_LOG_PATH
         )
         
-        print("重置模型初始训练步数...")
-        self.model.num_timesteps = 0
-        self.model._total_timesteps = 0
+        # print("重置模型初始训练步数...")
+        # self.model.num_timesteps = 0
+        # self.model._total_timesteps = 0
         
         print("✅ 环境和模型准备完成！")
 
@@ -294,14 +294,8 @@ class SelfPlayTrainer:
 
                 print("🧠 正在将学习者重置为新主宰者的状态...")
                 old_logger = self.model.logger
-                old_total_timesteps = self.model._total_timesteps
-                
                 self.model = MaskablePPO.load(MAIN_OPPONENT_PATH, env=self.env)
-                
                 self.model.set_logger(old_logger)
-                self.model.num_timesteps = 0
-                self.model._total_timesteps = old_total_timesteps
-                
                 return True
 
             except Exception as e:
