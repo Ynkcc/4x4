@@ -39,7 +39,8 @@ N_ENVS = 8
 
 # --- PPO 训练细化超参数（用于覆盖加载后的模型配置） ---
 # 注意：这些值会在加载模型后被直接写入到模型实例上
-PPO_CLIP_RANGE = 1
+# 【核心修正】将 clip_range 从 1 修改为 0.2，以稳定训练过程
+PPO_CLIP_RANGE = 0.2
 PPO_VF_COEF = 0.8
 PPO_N_EPOCHS = 20
 PPO_GAE_LAMBDA = 0.92

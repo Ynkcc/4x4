@@ -9,7 +9,7 @@ import numpy as np
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from sb3_contrib import MaskablePPO
-from stable_baselines3.common.utils import get_linear_fn
+from stable_baselines3.common.utils import LinearSchedule
 
 # 【更新】导入所有需要的常量
 from utils.constants import *
@@ -21,8 +21,8 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
     加载PPO模型并应用自定义超参数。
     """
     # 【修复】学习率和裁剪范围应该是可调用的调度器
-    lr_schedule = get_linear_fn(start=INITIAL_LR, end=INITIAL_LR, end_fraction=1.0)
-    clip_range_schedule = get_linear_fn(start=PPO_CLIP_RANGE, end=PPO_CLIP_RANGE, end_fraction=1.0)
+    lr_schedule = LinearSchedule(initial_value=INITIAL_LR, final_value=INITIAL_LR)
+    clip_range_schedule = LinearSchedule(initial_value=PPO_CLIP_RANGE, final_value=PPO_CLIP_RANGE)
 
     model = MaskablePPO.load(
         model_path,
