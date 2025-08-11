@@ -1,5 +1,6 @@
 # game/environment.py
 # Game.py - 基于Numpy向量的暗棋环境 (已修改以支持CNN和健壮的对手模型更新)
+# 【V5 优化版】: 实现了对手模型的“即时加载”(Just-in-Time Loading)与缓存机制，解决了多环境训练时的内存冗余问题。
 import os
 import random
 from enum import Enum
@@ -20,7 +21,7 @@ except ImportError:
 
 # --- 游戏核心规则 ---
 WINNING_SCORE = 60  # 达到该分数获胜
-MAX_CONSECUTIVE_MOVES_FOR_DRAW = 12 # 连续这么多步没有翻棋或吃子，则判为平局
+MAX_CONSECUTIVE_MOVES_FOR_DRAW = 50 # 连续这么多步没有翻棋或吃子，则判为平局 (已采纳建议修改)
 MAX_STEPS_PER_EPISODE = 100 # 每局游戏的最大步数，超出则强制截断为平局
 
 class PieceType(Enum):
@@ -65,8 +66,7 @@ SQ_TO_POS = {sq: (sq // BOARD_COLS, sq % BOARD_COLS) for sq in range(TOTAL_POSIT
 class GameEnvironment(gym.Env):
     """
     基于Numpy布尔向量的暗棋Gym环境。
-    【重要修改】: 状态空间已修改为支持CNN的字典格式。
-    【V4 修复】: 对手模型改为从一个可动态更新的“对手池”中加载。
+    【V5 优化版】: 实现对手模型的即时加载与缓存。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
@@ -77,17 +77,22 @@ class GameEnvironment(gym.Env):
         
         self.learning_player_id = 1  # 学习者始终是玩家1（红方）
         
-        self.opponent_agent_for_eval = opponent_agent
+        # --- 对手管理核心变更 ---
+        self.opponent_agent_for_eval = opponent_agent # 用于评估模式的固定对手
         self.opponent_pool = opponent_pool if opponent_pool else []
         self.opponent_weights = opponent_weights if opponent_weights else []
-        self.loaded_opponents: Dict[str, Any] = {}
+        
+        # 【优化】loaded_opponents 现在作为一个缓存存在，而不是预加载所有模型
+        self.loaded_opponents: Dict[str, Any] = {} 
         self.active_opponent: Optional[Any] = None
 
+        # 如果是评估模式，则直接加载并设置固定对手
         if self.opponent_agent_for_eval:
             self.active_opponent = self.opponent_agent_for_eval
-        elif self.opponent_pool:
-            self._load_opponent_pool()
+        
+        # 【移除】不再在初始化时调用 _load_opponent_pool()
 
+        # --- 状态空间和动作空间定义 (不变) ---
         num_channels = NUM_PIECE_TYPES * 2 + 2
         board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
         scalar_shape = (3 + 8 + 8,)
@@ -99,6 +104,7 @@ class GameEnvironment(gym.Env):
 
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
 
+        # --- 游戏状态变量 (不变) ---
         self.board = np.empty(TOTAL_POSITIONS, dtype=object)
         self.piece_vectors = {p: [np.zeros(TOTAL_POSITIONS, dtype=bool) for _ in range(NUM_PIECE_TYPES)] for p in [1, -1]}
         self.revealed_vectors = {p: np.zeros(TOTAL_POSITIONS, dtype=bool) for p in [1, -1]}
@@ -116,35 +122,64 @@ class GameEnvironment(gym.Env):
         self.coords_to_action = {}
         self._initialize_lookup_tables()
 
-    def _load_opponent_pool(self):
-        """加载对手池中的所有模型到内存。"""
-        if MaskablePPO is None:
-            raise ImportError("需要安装 `sb3-contrib` 库来加载对手模型。")
-        
-        self.loaded_opponents.clear()
-        print(f"进程 {os.getpid()}: 正在加载对手池...")
-        for model_path in self.opponent_pool:
-            if not os.path.exists(model_path):
-                print(f"环境内警告：找不到对手模型文件: {model_path}，已跳过。")
-                continue
-            try:
-                self.loaded_opponents[model_path] = MaskablePPO.load(model_path, device='cpu')
-                print(f"进程 {os.getpid()}: 已加载对手 {os.path.basename(model_path)}")
-            except Exception as e:
-                print(f"环境内错误：加载对手模型 {model_path} 失败: {e}")
-        
-        if not self.loaded_opponents:
-            print(f"进程 {os.getpid()}: 警告！对手池为空或所有模型加载失败！")
+    # 【移除】_load_opponent_pool 方法被移除，其功能被合并到 reset 方法中
 
     def reload_opponent_pool(self, new_pool: List[str], new_weights: List[float]):
         """
-        公开的方法，用于从外部（例如训练器主进程）完全更新此环境的对手池。
+        【优化】公开的方法，用于更新对手池路径和权重。
+        此方法现在只更新列表，不执行任何模型加载，因此非常迅速。
+        同时会清空模型缓存，以确保能加载到最新的模型文件。
         """
-        print(f"进程 {os.getpid()}: 收到指令，正在更新对手池...")
+        print(f"进程 {os.getpid()}: 收到指令，正在更新对手池路径...")
         self.opponent_pool = new_pool
         self.opponent_weights = new_weights
-        self._load_opponent_pool()
+        
+        # 清空缓存，以便在下次需要时能加载更新后的模型文件（例如main_opponent.zip被覆盖后）
+        self.loaded_opponents.clear() 
+        print(f"进程 {os.getpid()}: 对手池路径已更新，模型缓存已清空。")
         return True
+
+    def reset(self, seed=None, options=None):
+        """
+        【核心优化】在重置游戏时，按需选择并加载单个对手模型。
+        """
+        super().reset(seed=seed)
+
+        # 仅在训练模式下（即非评估模式）且对手池非空时，才选择和加载对手
+        if not self.opponent_agent_for_eval and self.opponent_pool:
+            if MaskablePPO is None:
+                raise ImportError("需要安装 `sb3-contrib` 库来加载对手模型。")
+
+            # 1. 根据权重选择一个对手模型的 *路径*
+            normalized_weights = np.array(self.opponent_weights) / np.sum(self.opponent_weights)
+            chosen_path = self.np_random.choice(self.opponent_pool, p=normalized_weights)
+            
+            # 2. 检查缓存中是否已有该模型
+            if chosen_path in self.loaded_opponents:
+                self.active_opponent = self.loaded_opponents[chosen_path]
+            else:
+                # 3. 如果不在缓存中，则从磁盘加载并存入缓存
+                try:
+                    if not os.path.exists(chosen_path):
+                         raise FileNotFoundError(f"找不到对手模型文件: {chosen_path}")
+                    # print(f"进程 {os.getpid()}: 正在加载对手 {os.path.basename(chosen_path)}...") # 可选的调试信息
+                    model = MaskablePPO.load(chosen_path, device='cpu')
+                    self.loaded_opponents[chosen_path] = model
+                    self.active_opponent = model
+                except Exception as e:
+                    print(f"环境内错误：加载对手模型 {chosen_path} 失败: {e}。本局游戏将没有对手。")
+                    self.active_opponent = None
+        
+        elif self.opponent_agent_for_eval:
+             # 评估模式下，使用固定的对手
+             self.active_opponent = self.opponent_agent_for_eval
+        else:
+             # 如果没有对手池也没有评估对手，则对手为None
+             self.active_opponent = None
+
+        self._initialize_board()
+        info = {'action_mask': self.action_masks(self.current_player), 'winner': None}
+        return self.get_state(), info
 
     def step(self, action_index):
         # 1. 应用学习者的动作
@@ -153,10 +188,19 @@ class GameEnvironment(gym.Env):
         # 2. 如果学习者的动作直接结束游戏，准备信息并返回
         if terminated or truncated:
             info = {'winner': winner, 'action_mask': self.action_masks(self.current_player)}
-            return self.get_state(), np.float32(reward), terminated, truncated, info
+            # 在返回前，增加对中间奖励的应用
+            final_reward = reward
+            if terminated:
+                if winner == self.learning_player_id: final_reward = 1.0
+                elif winner == -self.learning_player_id: final_reward = -1.0
+                else: final_reward = 0.0
+            elif truncated:
+                final_reward = -0.5
+            return self.get_state(), np.float32(final_reward), terminated, truncated, info
 
         # 3. 进入对手回合
         self.current_player = -self.current_player
+        opponent_final_reward = 0.0
 
         if self.active_opponent is not None:
             opponent_obs = self.get_state()
@@ -177,9 +221,21 @@ class GameEnvironment(gym.Env):
                     opponent_action = np.random.choice(valid_actions)
                 
                 opponent_reward, terminated, truncated, winner = self._internal_apply_action(opponent_action)
-                reward -= opponent_reward
-
-        # 4. 准备返回
+                
+                # 计算对手的最终回合奖励
+                if terminated:
+                    if winner == self.current_player: opponent_final_reward = 1.0
+                    elif winner == -self.current_player: opponent_final_reward = -1.0
+                    else: opponent_final_reward = 0.0
+                elif truncated:
+                    opponent_final_reward = -0.5
+                else:
+                    opponent_final_reward = opponent_reward
+        
+        # 4. 学习者的总奖励 = 自己的中间奖励 - 对手的最终回合奖励
+        final_reward = reward - opponent_final_reward
+        
+        # 5. 准备返回
         self.current_player = self.learning_player_id
         
         final_obs = self.get_state()
@@ -189,8 +245,118 @@ class GameEnvironment(gym.Env):
         if (terminated or truncated) and self.render_mode == "human":
             self.render()
 
-        return final_obs, np.float32(reward), terminated, truncated, info
+        return final_obs, np.float32(final_reward), terminated, truncated, info
 
+    def _internal_apply_action(self, action_index):
+        # ... (此函数前半部分不变) ...
+        coords = self.action_to_coords.get(action_index)
+        if coords is None:
+            raise ValueError(f"错误：无效的动作索引: {action_index}")
+        
+        action_mask = self.action_masks(self.current_player)
+        if not action_mask[action_index]:
+            debug_info = self.get_debug_state_string()
+            error_msg = (f"\n{'='*80}\n错误：试图执行无效动作!\n"
+                         f"  - 动作索引: {action_index}\n  - 动作坐标: {coords}\n"
+                         f"  - 当前玩家: {self.current_player}\n{'='*80}\n"
+                         f"环境当前状态:\n{debug_info}\n"
+                         f"  - 当前合法的动作掩码中，值为1的数量: {np.sum(action_mask)}\n{'='*80}")
+            raise ValueError(error_msg)
+
+        self.total_step_counter += 1
+        winner = None
+        intermediate_reward = 0.0 # 【修改】使用中间奖励
+        
+        if action_index < REVEAL_ACTIONS_COUNT:
+            from_sq = POS_TO_SQ[coords]
+            self._apply_reveal_update(from_sq)
+            self.move_counter = 0
+        else:
+            from_sq = POS_TO_SQ[coords[0]]
+            to_sq = POS_TO_SQ[coords[1]]
+            intermediate_reward = self._apply_move_action(from_sq, to_sq) # 【修改】接收吃子奖励
+        
+        terminated, truncated = False, False
+        
+        if self.scores[1] >= WINNING_SCORE:
+            winner, terminated = 1, True
+        elif self.scores[-1] >= WINNING_SCORE:
+            winner, terminated = -1, True
+        
+        opponent_player_id = -self.current_player
+        opponent_action_mask = self.action_masks(opponent_player_id)
+        if not terminated and not truncated and np.sum(opponent_action_mask) == 0:
+            winner = self.current_player
+            terminated = True
+
+        if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES_FOR_DRAW:
+            winner, terminated = 0, True
+
+        if not terminated and not truncated and self.total_step_counter >= MAX_STEPS_PER_EPISODE:
+            winner, truncated = 0, True
+
+        # 【修改】此函数现在只返回中间奖励。最终奖励在 step() 中计算。
+        return intermediate_reward, terminated, truncated, winner
+
+
+    def _apply_move_action(self, from_sq, to_sq):
+        attacker = self.board[from_sq]
+        defender = self.board[to_sq]
+        if attacker is None or not attacker.revealed:
+            raise ValueError(f"错误：试图从 {from_sq} 移动空或未翻开的棋子")
+        
+        if defender is None:
+            # 移动到空格
+            self.board[to_sq], self.board[from_sq] = attacker, None
+            self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
+            self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
+            self.revealed_vectors[attacker.player][from_sq] = False
+            self.revealed_vectors[attacker.player][to_sq] = True
+            self.empty_vector[from_sq] = True
+            self.empty_vector[to_sq] = False
+            self.move_counter += 1
+            return 0.0 # 【修改】移动不产生奖励
+        
+        # --- 吃子逻辑 ---
+        points = PIECE_VALUES[defender.piece_type]
+        is_cannon_attack = attacker.piece_type == PieceType.CANNON
+        
+        if is_cannon_attack and attacker.player == defender.player:
+            self.scores[-attacker.player] += points
+        else:
+            self.scores[attacker.player] += points
+            
+        # 更新棋盘向量
+        self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
+        self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
+        self.revealed_vectors[attacker.player][from_sq] = False
+        self.revealed_vectors[attacker.player][to_sq] = True
+        if defender.revealed:
+            self.piece_vectors[defender.player][defender.piece_type.value][to_sq] = False
+            self.revealed_vectors[defender.player][to_sq] = False
+        else:
+            self.hidden_vector[to_sq] = False
+        self.empty_vector[from_sq] = True
+        self.dead_pieces[defender.player].append(defender)
+        self.board[to_sq], self.board[from_sq] = attacker, None
+        self.move_counter = 0
+
+        # 【修改】返回归一化的吃子奖励
+        return (points / WINNING_SCORE) * 0.1
+
+    def close(self):
+        """关闭环境时，清空缓存，释放模型占用的内存。"""
+        self.loaded_opponents.clear()
+        self.active_opponent = None
+        # print(f"进程 {os.getpid()}: 环境关闭，模型缓存已清空。") # 可选的调试信息
+        pass
+    
+    # ==========================================================================
+    # --- 以下是无需修改的辅助函数 ---
+    # _initialize_lookup_tables, _reset_all_vectors_and_state, 
+    # _update_vectors_from_board, _initialize_board, get_state,
+    # _apply_reveal_update, action_masks, render, get_debug_state_string
+    # ==========================================================================
     def _initialize_lookup_tables(self):
         ray_attacks = np.zeros((4, TOTAL_POSITIONS, TOTAL_POSITIONS), dtype=bool)
         for sq in range(TOTAL_POSITIONS):
@@ -276,26 +442,6 @@ class GameEnvironment(gym.Env):
         self.hidden_vector.fill(True)
         self.empty_vector.fill(False)
         self._update_vectors_from_board()
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-
-        if self.loaded_opponents:
-            valid_pool_paths = [p for p in self.opponent_pool if p in self.loaded_opponents]
-            if valid_pool_paths:
-                valid_weights = [self.opponent_weights[self.opponent_pool.index(p)] for p in valid_pool_paths]
-                normalized_weights = np.array(valid_weights) / np.sum(valid_weights)
-                chosen_path = self.np_random.choice(valid_pool_paths, p=normalized_weights)
-                self.active_opponent = self.loaded_opponents[chosen_path]
-            else:
-                self.active_opponent = None
-        
-        elif not self.opponent_agent_for_eval:
-             self.active_opponent = None
-
-        self._initialize_board()
-        info = {'action_mask': self.action_masks(self.current_player), 'winner': None}
-        return self.get_state(), info
     
     def get_state(self):
         my_player = self.current_player
@@ -338,67 +484,6 @@ class GameEnvironment(gym.Env):
         scalar_state = np.concatenate([base_scalars, my_survival_vector, opponent_survival_vector])
         return {"board": board_state, "scalars": scalar_state}
 
-    def _internal_apply_action(self, action_index):
-        coords = self.action_to_coords.get(action_index)
-        if coords is None:
-            raise ValueError(f"错误：无效的动作索引: {action_index}")
-        
-        action_mask = self.action_masks(self.current_player)
-        if not action_mask[action_index]:
-            debug_info = self.get_debug_state_string()
-            error_msg = (f"\n{'='*80}\n错误：试图执行无效动作!\n"
-                         f"  - 动作索引: {action_index}\n  - 动作坐标: {coords}\n"
-                         f"  - 当前玩家: {self.current_player}\n{'='*80}\n"
-                         f"环境当前状态:\n{debug_info}\n"
-                         f"  - 当前合法的动作掩码中，值为1的数量: {np.sum(action_mask)}\n{'='*80}")
-            raise ValueError(error_msg)
-        
-        self.total_step_counter += 1
-        winner = None
-        reward = 0.0
-        
-        if action_index < REVEAL_ACTIONS_COUNT:
-            from_sq = POS_TO_SQ[coords]
-            self._apply_reveal_update(from_sq)
-            self.move_counter = 0
-        else:
-            from_sq = POS_TO_SQ[coords[0]]
-            to_sq = POS_TO_SQ[coords[1]]
-            self._apply_move_action(from_sq, to_sq)
-        
-        terminated, truncated = False, False
-        
-        if self.scores[1] >= WINNING_SCORE:
-            winner, terminated = 1, True
-        elif self.scores[-1] >= WINNING_SCORE:
-            winner, terminated = -1, True
-        
-        opponent_player_id = -self.current_player
-        opponent_action_mask = self.action_masks(opponent_player_id)
-        if not terminated and not truncated and np.sum(opponent_action_mask) == 0:
-            winner = self.current_player
-            terminated = True
-
-        # 【更新】使用常量判断平局
-        if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES_FOR_DRAW:
-            winner, terminated = 0, True
-
-        # 【更新】使用常量强制截断
-        if not terminated and not truncated and self.total_step_counter >= MAX_STEPS_PER_EPISODE:
-            winner, truncated = 0, True
-
-        if terminated:
-            if winner == self.current_player:
-                reward = 1.0
-            elif winner == -self.current_player:
-                reward = -1.0
-            else:
-                reward = 0.0 
-        elif truncated:
-            reward = -0.5
-
-        return reward, terminated, truncated, winner
-
     def _apply_reveal_update(self, from_sq):
         piece = self.board[from_sq]
         if piece is None or piece.revealed:
@@ -407,46 +492,6 @@ class GameEnvironment(gym.Env):
         self.hidden_vector[from_sq] = False
         self.revealed_vectors[piece.player][from_sq] = True
         self.piece_vectors[piece.player][piece.piece_type.value][from_sq] = True
-
-    def _apply_move_action(self, from_sq, to_sq):
-        attacker = self.board[from_sq]
-        defender = self.board[to_sq]
-        if attacker is None or not attacker.revealed:
-            raise ValueError(f"错误：试图从 {from_sq} 移动空或未翻开的棋子")
-        
-        if defender is None:
-            self.board[to_sq], self.board[from_sq] = attacker, None
-            self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
-            self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
-            self.revealed_vectors[attacker.player][from_sq] = False
-            self.revealed_vectors[attacker.player][to_sq] = True
-            self.empty_vector[from_sq] = True
-            self.empty_vector[to_sq] = False
-            self.move_counter += 1
-            return
-        
-        points = PIECE_VALUES[defender.piece_type]
-        is_cannon_attack = attacker.piece_type == PieceType.CANNON
-        
-        if is_cannon_attack and attacker.player == defender.player:
-            self.scores[-attacker.player] += points
-        else:
-            self.scores[attacker.player] += points
-            
-        self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
-        self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
-        self.revealed_vectors[attacker.player][from_sq] = False
-        self.revealed_vectors[attacker.player][to_sq] = True
-        if defender.revealed:
-            self.piece_vectors[defender.player][defender.piece_type.value][to_sq] = False
-            self.revealed_vectors[defender.player][to_sq] = False
-        else:
-            self.hidden_vector[to_sq] = False
-        self.empty_vector[from_sq] = True
-        self.dead_pieces[defender.player].append(defender)
-        self.board[to_sq], self.board[from_sq] = attacker, None
-        self.move_counter = 0
-        return
 
     def action_masks(self, player_id: int = None):
         action_mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
@@ -555,8 +600,3 @@ class GameEnvironment(gym.Env):
             f"  - 得分 (红/黑): {self.scores[1]} / {self.scores[-1]}\n"
         )
         return state_str
-
-    def close(self):
-        self.loaded_opponents.clear()
-        self.active_opponent = None
-        pass

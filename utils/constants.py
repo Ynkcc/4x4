@@ -32,20 +32,14 @@ TOTAL_TRAINING_LOOPS = 1000
 # 在每次评估之间，学习者训练多少步
 STEPS_PER_LOOP = 16384
 # 初始学习率
-INITIAL_LR = 3e-5 
+INITIAL_LR = 1e-4
 # 并行环境数量
 N_ENVS = 8
-
-# --- PPO 模型超参数 ---
-PPO_CLIP_RANGE = 0.1
-PPO_VF_COEF = 0.8
-PPO_N_EPOCHS = 20
-PPO_GAE_LAMBDA = 0.92
 
 
 # --- PPO 训练细化超参数（用于覆盖加载后的模型配置） ---
 # 注意：这些值会在加载模型后被直接写入到模型实例上
-PPO_CLIP_RANGE = 0.1
+PPO_CLIP_RANGE = 1
 PPO_VF_COEF = 0.8
 PPO_N_EPOCHS = 20
 PPO_GAE_LAMBDA = 0.92

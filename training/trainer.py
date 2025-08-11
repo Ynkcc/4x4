@@ -9,6 +9,7 @@ import numpy as np
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from sb3_contrib import MaskablePPO
+from stable_baselines3.common.utils import get_linear_fn
 
 # 【更新】导入所有需要的常量
 from utils.constants import *
@@ -19,17 +20,21 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
     """
     加载PPO模型并应用自定义超参数。
     """
+    # 【修复】学习率和裁剪范围应该是可调用的调度器
+    lr_schedule = get_linear_fn(start=INITIAL_LR, end=INITIAL_LR, end_fraction=1.0)
+    clip_range_schedule = get_linear_fn(start=PPO_CLIP_RANGE, end=PPO_CLIP_RANGE, end_fraction=1.0)
+
     model = MaskablePPO.load(
         model_path,
         env=env,
-        n_steps=512,
-        learning_rate=INITIAL_LR,
-        tensorboard_log=tensorboard_log
+        learning_rate=lr_schedule,
+        clip_range=clip_range_schedule,
+        tensorboard_log=tensorboard_log,
+        n_steps=512, # 保持n_steps
     )
     
-    # 应用自定义PPO超参数
-    model.clip_range = PPO_CLIP_RANGE
-    model.vf_coef = PPO_VF_COEF  
+    # 应用其他自定义PPO超参数
+    model.vf_coef = PPO_VF_COEF
     model.n_epochs = PPO_N_EPOCHS
     model.gae_lambda = PPO_GAE_LAMBDA
     
@@ -267,19 +272,16 @@ class SelfPlayTrainer:
             tensorboard_log=TENSORBOARD_LOG_PATH
         )
         
-        # print("重置模型初始训练步数...")
-        # self.model.num_timesteps = 0
-        # self.model._total_timesteps = 0
-        
         print("✅ 环境和模型准备完成！")
 
     def _train_learner(self, loop_number: int):
         """训练学习者模型。"""
         print(f"🏋️  阶段一: 学习者进行 {STEPS_PER_LOOP:,} 步训练...")
+        # 【修复】移除内部进度条，避免与外部冲突
         self.model.learn(
             total_timesteps=STEPS_PER_LOOP,
             reset_num_timesteps=False,
-            progress_bar=True
+            progress_bar=False 
         )
 
     def _evaluate_and_update(self, loop_number: int) -> bool:
