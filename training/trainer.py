@@ -15,6 +15,26 @@ from utils.constants import *
 from game.environment import GameEnvironment
 from training.evaluator import evaluate_models # 使用镜像评估器
 
+def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=None):
+    """
+    加载PPO模型并应用自定义超参数。
+    """
+    model = MaskablePPO.load(
+        model_path,
+        env=env,
+        n_steps=512,
+        learning_rate=INITIAL_LR,
+        tensorboard_log=tensorboard_log
+    )
+    
+    # 应用自定义PPO超参数
+    model.clip_range = PPO_CLIP_RANGE
+    model.vf_coef = PPO_VF_COEF  
+    model.n_epochs = PPO_N_EPOCHS
+    model.gae_lambda = PPO_GAE_LAMBDA
+    
+    return model
+
 class SelfPlayTrainer:
     """
     【V5 最终版】集成了动态Elo评估、对手池轮换和多环境实时同步的训练器。
@@ -108,24 +128,31 @@ class SelfPlayTrainer:
         except IOError as e:
             print(f"错误：无法保存Elo评分文件: {e}")
 
-    def _update_elo(self, winner_name, loser_name, win_rate):
+    def _update_elo(self, player_a_name, player_b_name, player_a_score):
         """
-        根据镜像对局的实际胜率更新双方的Elo评分。
+        根据镜像对局的实际得分更新双方的Elo评分。
+        player_a_score 是玩家A的得分，范围在0.0到1.0之间。
         """
-        winner_elo = self.elo_ratings.get(winner_name, self.default_elo)
-        loser_elo = self.elo_ratings.get(loser_name, self.default_elo)
+        player_a_elo = self.elo_ratings.get(player_a_name, self.default_elo)
+        player_b_elo = self.elo_ratings.get(player_b_name, self.default_elo)
 
-        expected_win = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
+        # 计算期望得分
+        expected_score_a = 1 / (1 + 10 ** ((player_b_elo - player_a_elo) / 400))
+        expected_score_b = 1.0 - expected_score_a
         
-        new_winner_elo = winner_elo + self.elo_k_factor * (win_rate - expected_win)
-        new_loser_elo = loser_elo - self.elo_k_factor * (win_rate - expected_win)
+        # 实际得分
+        player_b_score = 1.0 - player_a_score
         
-        self.elo_ratings[winner_name] = new_winner_elo
-        self.elo_ratings[loser_name] = new_loser_elo
+        # 更新Elo评分
+        new_player_a_elo = player_a_elo + self.elo_k_factor * (player_a_score - expected_score_a)
+        new_player_b_elo = player_b_elo + self.elo_k_factor * (player_b_score - expected_score_b)
         
-        print(f"Elo 更新 (基于胜率 {win_rate:.2%}):")
-        print(f"  - {winner_name}: {winner_elo:.0f} -> {new_winner_elo:.0f} (Δ {new_winner_elo - winner_elo:+.1f})")
-        print(f"  - {loser_name}: {loser_elo:.0f} -> {new_loser_elo:.0f} (Δ {new_loser_elo - loser_elo:+.1f})")
+        self.elo_ratings[player_a_name] = new_player_a_elo
+        self.elo_ratings[player_b_name] = new_player_b_elo
+        
+        print(f"Elo 更新 (基于得分 {player_a_score:.2%}):")
+        print(f"  - {player_a_name}: {player_a_elo:.0f} -> {new_player_a_elo:.0f} (Δ {new_player_a_elo - player_a_elo:+.1f})")
+        print(f"  - {player_b_name}: {player_b_elo:.0f} -> {new_player_b_elo:.0f} (Δ {new_player_b_elo - player_b_elo:+.1f})")
 
     def _update_opponent_weights(self):
         """
@@ -234,11 +261,9 @@ class SelfPlayTrainer:
         )
         
         print("加载学习者模型...")
-        self.model = MaskablePPO.load(
+        self.model = load_ppo_model_with_hyperparams(
             MAIN_OPPONENT_PATH,
             env=self.env,
-            n_steps=512,
-            learning_rate=INITIAL_LR,
             tensorboard_log=TENSORBOARD_LOG_PATH
         )
         
@@ -293,9 +318,11 @@ class SelfPlayTrainer:
                     print("⚠️ 部分环境未能成功更新对手池。")
 
                 print("🧠 正在将学习者重置为新主宰者的状态...")
-                old_logger = self.model.logger
-                self.model = MaskablePPO.load(MAIN_OPPONENT_PATH, env=self.env)
-                self.model.set_logger(old_logger)
+                self.model = load_ppo_model_with_hyperparams(
+                    MAIN_OPPONENT_PATH,
+                    env=self.env,
+                    tensorboard_log=TENSORBOARD_LOG_PATH
+                )
                 return True
 
             except Exception as e:
@@ -303,7 +330,7 @@ class SelfPlayTrainer:
 
         else:
             print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者与对手池保持不变。")
-            self._update_elo(main_opponent_name, challenger_name, 1.0 - win_rate)
+            self._update_elo(challenger_name, main_opponent_name, win_rate)
             self.elo_ratings.pop(challenger_name)
             self._save_elo_ratings()
             return False

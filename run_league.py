@@ -77,8 +77,8 @@ def evaluate_matchup_worker(matchup: tuple) -> tuple:
     eval_env.close()
 
     # 4. 计算并返回结果
-    total_decisive = scores['model_a_wins'] + scores['model_b_wins']
-    win_rate_a = scores['model_a_wins'] / total_decisive if total_decisive > 0 else 0.5
+    total_games = scores['model_a_wins'] + scores['model_b_wins'] + scores['draws']
+    win_rate_a = scores['model_a_wins'] / total_games if total_games > 0 else 0.5
     
     return model_a_path, model_b_path, win_rate_a
 
