@@ -30,7 +30,7 @@ TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_fin
 # 总共进行多少次 "训练 -> 评估" 的循环
 TOTAL_TRAINING_LOOPS = 1000
 # 在每次评估之间，学习者训练多少步
-STEPS_PER_LOOP = 16384 * 2
+STEPS_PER_LOOP = 16384 * 10
 # 并行环境数量
 N_ENVS = 8
 
@@ -72,8 +72,12 @@ NETWORK_NUM_HIDDEN_CHANNELS = 64
 
 
 # --- 对手池与Elo系统超参数 ---
-# 对手池最大容量
+# ==============================================================================
+# 【重构】将对手池拆分为长期和短期
 MAX_OPPONENT_POOL_SIZE = 20
+SHORT_TERM_POOL_SIZE = MAX_OPPONENT_POOL_SIZE // 2
+LONG_TERM_POOL_SIZE = MAX_OPPONENT_POOL_SIZE - SHORT_TERM_POOL_SIZE
+# ==============================================================================
 # Elo 默认初始值
 ELO_DEFAULT = 1200
 # Elo K因子 (用于更新评分)
