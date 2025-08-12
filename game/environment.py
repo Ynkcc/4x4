@@ -80,11 +80,11 @@ class GameEnvironment(gym.Env):
                  opponent_agent: Optional[Any] = None,
                  opponent_pool: Optional[List[str]] = None,
                  opponent_weights: Optional[List[float]] = None,
-                 shaping_coef: float = 0.1):  # 【修改】系数改为0.1
+                 shaping_coef: float = 0.1):
         super().__init__()
         self.render_mode = render_mode
         self.learning_player_id = 1
-        self.shaping_coef = shaping_coef  # 【新增】奖励塑形系数
+        self.shaping_coef = shaping_coef
 
         # 对手配置
         self.opponent_agent_for_eval = opponent_agent
@@ -385,34 +385,43 @@ class GameEnvironment(gym.Env):
             mask[self.coords_to_action[SQ_TO_POS[sq]]] = 1
 
         # --- 移动和吃子动作 ---
-        # 2. 计算所有对手棋子的位置
-        all_opp_pieces = np.zeros(TOTAL_POSITIONS, dtype=bool)
-        for pt in PieceType:
-            all_opp_pieces |= self.piece_vectors[-my_player][pt.value]
+        # 【重要修复】采用 temp_game.py 的逻辑，正确实现棋子等级制度
+        # 3. 计算不同棋子的目标位置 (可移动/可吃)，遵守等级规则
+        target_vectors = {}
+        # 从空位开始，逐级加入更小或同级的敌方棋子作为可攻击目标
+        cumulative_targets = self.empty_vector.copy()
+        for pt in PieceType: # PieceType的枚举顺序决定了棋子等级
+            cumulative_targets |= self.piece_vectors[-my_player][pt.value]
+            target_vectors[pt.value] = cumulative_targets.copy()
         
-        # 3. 计算不同棋子的目标位置 (可移动/可吃)
-        target_vectors = {pt.value: (all_opp_pieces | self.empty_vector) for pt in PieceType}
-        # 兵不能吃帅，但帅可以吃兵
-        target_vectors[PieceType.GENERAL.value] &= ~self.piece_vectors[-my_player][PieceType.SOLDIER.value]
+        # 应用特殊规则: 兵可以吃帅
         target_vectors[PieceType.SOLDIER.value] |= self.piece_vectors[-my_player][PieceType.GENERAL.value]
+        # 应用特殊规则: 帅不能吃兵
+        target_vectors[PieceType.GENERAL.value] &= ~self.piece_vectors[-my_player][PieceType.SOLDIER.value]
 
         # 4. 普通棋子 (非炮) 的移动
         for pt_val in range(NUM_PIECE_TYPES):
             if pt_val == PieceType.CANNON.value:
                 continue
+            
+            # 获取该等级棋子的所有可攻击/移动目标
+            valid_targets_for_pt = target_vectors[pt_val]
+
             for from_sq in np.where(self.piece_vectors[my_player][pt_val])[0]:
                 r, c = SQ_TO_POS[from_sq]
                 for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                     if 0 <= r + dr < BOARD_ROWS and 0 <= c + dc < BOARD_COLS:
                         to_sq = POS_TO_SQ[(r + dr, c + dc)]
-                        if target_vectors[pt_val][to_sq]:
+                        # 如果目标位置在合法目标集合中
+                        if valid_targets_for_pt[to_sq]:
                             idx = self.coords_to_action.get((SQ_TO_POS[from_sq], (r + dr, c + dc)))
                             if idx is not None:
                                 mask[idx] = 1
         
-        # 5. 炮的移动和攻击
+        # 5. 炮的移动和攻击 (此部分逻辑保持不变)
         all_pieces_vector = ~self.empty_vector
-        valid_cannon_targets = ~self.revealed_vectors[my_player] # 炮不能吃自己的明棋
+        # 炮不能吃自己的明棋, 但可以吃自己的暗棋、所有敌方棋子和空位(尽管攻击逻辑需要目标不能是空位)
+        valid_cannon_targets = ~self.revealed_vectors[my_player] 
         for from_sq in np.where(self.piece_vectors[my_player][PieceType.CANNON.value])[0]:
             for d_idx in range(4): # 4个方向
                 ray = self.attack_tables['rays'][d_idx, from_sq]
