@@ -289,6 +289,8 @@ class SelfPlayTrainer:
             env_kwargs={
                 'opponent_pool': self.opponent_pool_for_env,
                 'opponent_weights': self.opponent_pool_weights,
+                # 使用常量中的初始值
+                'shaping_coef': SHAPING_COEF_INITIAL 
             }
         )
         
@@ -304,9 +306,12 @@ class SelfPlayTrainer:
     def _train_learner(self):
         """训练学习者模型（即挑战者）。"""
         print(f"🏋️  阶段一: 挑战者进行 {STEPS_PER_LOOP:,} 步训练...")
+        start_time = time.time()
         self.model.learn(total_timesteps=STEPS_PER_LOOP, reset_num_timesteps=False, progress_bar=PPO_SHOW_PROGRESS)
         # 训练后立即保存，覆盖旧的挑战者模型
         self.model.save(CHALLENGER_PATH)
+        elapsed_time = time.time() - start_time
+        print(f"✅ 训练完成! 用时: {elapsed_time:.1f}秒, 总步数: {self.model.num_timesteps:,}")
         print(f"✅ 挑战者训练完成，新参数已保存至 {os.path.basename(CHALLENGER_PATH)}")
 
     def _update_elo(self, player_a_name, player_b_name, player_a_win_rate):
@@ -380,9 +385,35 @@ class SelfPlayTrainer:
             print("\n--- [步骤 3/5] 开始Elo自我对弈主循环 ---")
             successful_challenges = 0
             
+            # --- 【核心修改】奖励塑形衰减逻辑 ---
+            total_decay_loops = min(TOTAL_TRAINING_LOOPS, SHAPING_DECAY_END_LOOP)
+            if total_decay_loops > 0:
+                # 计算每个循环需要衰减的量
+                decay_per_loop = (SHAPING_COEF_INITIAL - SHAPING_COEF_FINAL) / total_decay_loops
+            else:
+                decay_per_loop = 0
+            
             for i in range(1, TOTAL_TRAINING_LOOPS + 1):
                 print(f"\n{'='*70}\n🔄 训练循环 {i}/{TOTAL_TRAINING_LOOPS} | 成功挑战次数: {successful_challenges}\n{'='*70}")
                 try:
+                    # --- 在每个循环开始时更新塑形系数 ---
+                    if SHAPING_COEF_INITIAL > SHAPING_COEF_FINAL: # 仅当需要衰减时才执行
+                        if i <= total_decay_loops:
+                            # 线性衰减
+                            current_coef = SHAPING_COEF_INITIAL - (i * decay_per_loop)
+                        else:
+                            # 衰减结束后，保持最终值
+                            current_coef = SHAPING_COEF_FINAL
+                        
+                        # 使用 set_attr 更新所有并行环境的属性
+                        self.env.set_attr("shaping_coef", current_coef)
+                        
+                        # 定期打印当前系数以供监控
+                        if PPO_VERBOSE > 0 and (i < total_decay_loops + 1):
+                            # get_attr 会返回一个列表，每个环境一个值，我们只取第一个来显示
+                            actual_coef = self.env.get_attr("shaping_coef")[0]
+                            print(f"      [INFO] 奖励塑形系数 (shaping_coef) 已更新为: {actual_coef:.4f}")
+
                     self._train_learner()
                     if self._evaluate_and_update():
                         successful_challenges += 1

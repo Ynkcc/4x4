@@ -26,13 +26,13 @@ FINAL_MODEL_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "final_model.zip")
 TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_final")
 
 
-# --- 训练超参数 ---
-# 总共进行多少次 "训练 -> 评估" 的循环
-TOTAL_TRAINING_LOOPS = 1000
-# 在每次评估之间，学习者训练多少步
-STEPS_PER_LOOP = 16384 * 10
-# 并行环境数量
-N_ENVS = 8
+# --- 游戏环境超参数 (新增) ---
+# 奖励塑形系数 (初始值)
+SHAPING_COEF_INITIAL = 0.00049
+# 奖励塑形系数 (衰减后的最终值)
+SHAPING_COEF_FINAL = 0.00001
+# 在第几次训练循环时，塑形系数衰减到最终值 (例如，在总循环数的一半时完成衰减)
+SHAPING_DECAY_END_LOOP = 10
 
 
 # --- PPO 模型超参数 (基于 stable-baselines3 默认值) ---
@@ -84,6 +84,14 @@ ELO_DEFAULT = 1200
 ELO_K_FACTOR = 32
 # Elo 权重计算的温度参数，用于决定与主宰者Elo差距多大的对手被选中的概率
 ELO_WEIGHT_TEMPERATURE = 100
+
+# --- 训练超参数 ---
+# 总共进行多少次 "训练 -> 评估" 的循环
+TOTAL_TRAINING_LOOPS = 1000
+# 并行环境数量
+N_ENVS = 8
+# 在每次评估之间，学习者训练多少步
+STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 2
 
 
 # --- 评估超参数 ---
