@@ -513,3 +513,10 @@ class GameEnvironment(gym.Env):
         self.hidden_vector[from_sq] = False
         self.revealed_vectors[piece.player][from_sq] = True
         self.piece_vectors[piece.player][piece.piece_type.value][from_sq] = True
+
+    def apply_single_action(self, action_index):
+        """
+        为GUI提供的公共方法：只执行单个动作，不自动切换玩家或处理对手回合。
+        返回: (reward, terminated, truncated, winner)
+        """
+        return self._internal_apply_action(action_index)

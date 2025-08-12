@@ -16,7 +16,7 @@ import numpy as np
 # 【修复】导入游戏环境的路径
 from game.environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
                               ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
-                              MAX_CONSECUTIVE_MOVES)
+                              MAX_CONSECUTIVE_MOVES_FOR_DRAW)
 
 # 导入AI模型
 try:
@@ -402,8 +402,8 @@ class MainWindow(QMainWindow):
         self.log_message(f"{player_name}: {move_desc}")
 
         # --- 修正逻辑开始 ---
-        # 1. 调用内部函数，只应用一个动作，不触发对手回合
-        _, terminated, truncated, winner = self.game._internal_apply_action(action_index)
+        # 1. 调用公共方法，只应用一个动作，不触发对手回合
+        _, terminated, truncated, winner = self.game.apply_single_action(action_index)
         self.selected_from_sq = None
 
         # 2. 检查游戏是否在这一步结束
@@ -610,7 +610,7 @@ class MainWindow(QMainWindow):
         self.scores_label.setText(f"{scores[1]} - {scores[-1]}")
         
         # 连续步数
-        self.move_counter_label.setText(f"{self.game.move_counter} / {MAX_CONSECUTIVE_MOVES}")
+        self.move_counter_label.setText(f"{self.game.move_counter} / {MAX_CONSECUTIVE_MOVES_FOR_DRAW}")
         
         # 游戏状态
         if self.game_over:

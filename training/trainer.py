@@ -295,10 +295,19 @@ class SelfPlayTrainer:
         challenger_name = "challenger_temp"
         main_opponent_name = "main_opponent.zip"
         
+        # 【修复Bug #3】改进Elo逻辑：挑战者初始Elo设为主宰者Elo + 小幅提升
+        # 这反映了挑战者是主宰者训练后的改进版本这一事实
+        main_opponent_elo = self.elo_ratings.get(main_opponent_name, self.default_elo)
+        # 给挑战者一个略高的初始Elo，表示它是训练改进的结果
+        challenger_initial_elo = main_opponent_elo + 10  # 小幅提升反映训练改进
+        self.elo_ratings[challenger_name] = challenger_initial_elo
+
+        self._update_elo(challenger_name, main_opponent_name, win_rate)
+        
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
-            self._update_elo(challenger_name, main_opponent_name, win_rate)
+            # 挑战成功后，其最终Elo被采纳，并从临时key中移出
             challenger_final_elo = self.elo_ratings.pop(challenger_name)
             self._add_new_opponent(challenger_final_elo)
             self._update_opponent_weights()
@@ -315,12 +324,9 @@ class SelfPlayTrainer:
                 else:
                     print("⚠️ 部分环境未能成功更新对手池。")
 
-                print("🧠 正在将学习者重置为新主宰者的状态...")
-                self.model = load_ppo_model_with_hyperparams(
-                    MAIN_OPPONENT_PATH,
-                    env=self.env,
-                    tensorboard_log=TENSORBOARD_LOG_PATH
-                )
+                print("🧠 挑战者已成为新主宰者，训练器将继续使用当前模型状态...")
+                # 【修复Bug #1】不重新加载模型，当前的self.model已经是新主宰者
+                # 只需要更新tensorboard日志路径以保持日志连续性
                 return True
 
             except Exception as e:
@@ -328,7 +334,7 @@ class SelfPlayTrainer:
 
         else:
             print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者与对手池保持不变。")
-            self._update_elo(challenger_name, main_opponent_name, win_rate)
+            # 挑战失败，主宰者Elo已在_update_elo中更新，移除临时的挑战者Elo即可
             self.elo_ratings.pop(challenger_name)
             self._save_elo_ratings()
             return False
