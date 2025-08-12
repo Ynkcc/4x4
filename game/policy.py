@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from utils.constants import NETWORK_FEATURES_DIM, NETWORK_NUM_RES_BLOCKS, NETWORK_NUM_HIDDEN_CHANNELS
 
 class ResidualBlock(nn.Module):
     """
@@ -38,7 +39,7 @@ class CustomNetwork(BaseFeaturesExtractor):
        - 19个标量：我方得分 + 敌方得分 + 连续未吃子步数 + 我方存活棋子(8) + 敌方存活棋子(8)
     最后将两个分支的特征融合在一起。
     """
-    def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 256, num_res_blocks: int = 4, num_hidden_channels: int = 64):
+    def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = NETWORK_FEATURES_DIM, num_res_blocks: int = NETWORK_NUM_RES_BLOCKS, num_hidden_channels: int = NETWORK_NUM_HIDDEN_CHANNELS):
         # features_dim 是融合后特征的总维度，这里我们动态计算它，并将其传递给策略和价值头
         super(CustomNetwork, self).__init__(observation_space, features_dim)
         

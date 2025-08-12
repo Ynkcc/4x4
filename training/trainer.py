@@ -13,26 +13,60 @@ from sb3_contrib import MaskablePPO
 # 【更新】导入所有需要的常量
 from utils.constants import *
 from game.environment import GameEnvironment
+from game.policy import CustomActorCriticPolicy  # 导入自定义策略
 from training.evaluator import evaluate_models # 使用镜像评估器
+
+def create_new_ppo_model(env=None, tensorboard_log=None):
+    """
+    创建一个全新的随机初始化的PPO模型。
+    """
+    model = MaskablePPO(
+        policy=CustomActorCriticPolicy,
+        env=env,
+        learning_rate=INITIAL_LR,
+        clip_range=PPO_CLIP_RANGE,
+        n_steps=PPO_N_STEPS,
+        batch_size=PPO_BATCH_SIZE,
+        n_epochs=PPO_N_EPOCHS,
+        gae_lambda=PPO_GAE_LAMBDA,
+        vf_coef=PPO_VF_COEF,
+        ent_coef=PPO_ENT_COEF,
+        max_grad_norm=PPO_MAX_GRAD_NORM,
+        tensorboard_log=tensorboard_log,
+        device=PPO_DEVICE,
+        verbose=PPO_VERBOSE,
+        policy_kwargs={
+            'features_extractor_kwargs': {
+                'features_dim': NETWORK_FEATURES_DIM,
+                'num_res_blocks': NETWORK_NUM_RES_BLOCKS,
+                'num_hidden_channels': NETWORK_NUM_HIDDEN_CHANNELS
+            }
+        }
+    )
+    
+    return model
 
 def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=None):
     """
     加载PPO模型并应用自定义超参数。
     """
-    # 【修复】由于学习率和裁剪范围是常数，直接使用数值更简单高效
     model = MaskablePPO.load(
         model_path,
         env=env,
         learning_rate=INITIAL_LR,
         clip_range=PPO_CLIP_RANGE,
         tensorboard_log=tensorboard_log,
-        n_steps=512, # 保持n_steps
+        n_steps=PPO_N_STEPS,
+        device=PPO_DEVICE
     )
     
     # 应用其他自定义PPO超参数
-    model.vf_coef = PPO_VF_COEF
+    model.batch_size = PPO_BATCH_SIZE
     model.n_epochs = PPO_N_EPOCHS
     model.gae_lambda = PPO_GAE_LAMBDA
+    model.vf_coef = PPO_VF_COEF
+    model.ent_coef = PPO_ENT_COEF
+    model.max_grad_norm = PPO_MAX_GRAD_NORM
     
     return model
 
@@ -70,7 +104,7 @@ class SelfPlayTrainer:
         os.makedirs(TENSORBOARD_LOG_PATH, exist_ok=True)
 
         if not os.path.exists(MAIN_OPPONENT_PATH):
-            print("未找到主宰者模型，将从指定的初始模型开始全新训练。")
+            print("未找到主宰者模型，检查是否有可用的初始模型...")
             initial_model_candidates = [SELF_PLAY_MODEL_PATH, CURRICULUM_MODEL_PATH]
             initial_model_found = None
             for candidate in initial_model_candidates:
@@ -78,21 +112,56 @@ class SelfPlayTrainer:
                     initial_model_found = candidate
                     print(f"找到初始模型: {candidate}")
                     break
-            if not initial_model_found:
-                raise FileNotFoundError(f"未找到任何可用的初始模型。尝试过的路径: {initial_model_candidates}")
             
-            shutil.copy(initial_model_found, MAIN_OPPONENT_PATH)
-            print(f"已将初始模型复制为第一个主宰者: {MAIN_OPPONENT_PATH}")
-            
-            # 将初始主宰者也加入对手池，作为第一个对手
-            initial_opponent_path = os.path.join(OPPONENT_POOL_DIR, "opponent_0.zip")
-            if not os.path.exists(initial_opponent_path):
-                 shutil.copy(initial_model_found, initial_opponent_path)
-                 # 初始化Elo并立即保存
-                 self.elo_ratings['opponent_0.zip'] = self.default_elo
-                 self._save_elo_ratings()
+            if initial_model_found:
+                # 如果找到了预训练模型，复制它
+                shutil.copy(initial_model_found, MAIN_OPPONENT_PATH)
+                print(f"已将初始模型复制为第一个主宰者: {MAIN_OPPONENT_PATH}")
+                
+                # 将初始主宰者也加入对手池，作为第一个对手
+                initial_opponent_path = os.path.join(OPPONENT_POOL_DIR, "opponent_0.zip")
+                if not os.path.exists(initial_opponent_path):
+                     shutil.copy(initial_model_found, initial_opponent_path)
+                     # 初始化Elo并立即保存
+                     self.elo_ratings['opponent_0.zip'] = self.default_elo
+                     self._save_elo_ratings()
+            else:
+                # 如果没有找到预训练模型，创建一个新的随机初始化模型
+                print("未找到任何预训练模型，将创建全新的随机初始化模型...")
+                self._create_initial_model()
 
         self._load_opponent_pool_and_elo()
+
+    def _create_initial_model(self):
+        """
+        创建一个全新的随机初始化模型作为起始点。
+        """
+        print("正在创建临时环境以初始化模型...")
+        
+        # 创建一个临时环境来初始化模型
+        temp_env = GameEnvironment()
+        
+        print("正在创建新的PPO模型...")
+        new_model = create_new_ppo_model(env=temp_env)
+        
+        # 保存新创建的模型
+        new_model.save(MAIN_OPPONENT_PATH)
+        print(f"✅ 新模型已保存到: {MAIN_OPPONENT_PATH}")
+        
+        # 将初始模型也加入对手池，作为第一个对手
+        initial_opponent_path = os.path.join(OPPONENT_POOL_DIR, "opponent_0.zip")
+        shutil.copy(MAIN_OPPONENT_PATH, initial_opponent_path)
+        print(f"✅ 初始模型已复制到对手池: {initial_opponent_path}")
+        
+        # 初始化Elo评分
+        self.elo_ratings['opponent_0.zip'] = self.default_elo
+        self.elo_ratings['main_opponent.zip'] = self.default_elo
+        self._save_elo_ratings()
+        print("✅ Elo评分已初始化")
+        
+        # 清理临时环境
+        temp_env.close()
+        print("✅ 临时环境已清理")
 
     def _load_opponent_pool_and_elo(self):
         """
@@ -145,19 +214,20 @@ class SelfPlayTrainer:
 
         # 计算期望得分
         expected_score_a = 1 / (1 + 10 ** ((player_b_elo - player_a_elo) / 400))
-        expected_score_b = 1.0 - expected_score_a
         
         # 实际得分
         player_b_score = 1.0 - player_a_score
         
         # 更新Elo评分
         new_player_a_elo = player_a_elo + self.elo_k_factor * (player_a_score - expected_score_a)
+        # B的期望得分是 1 - A的期望得分
+        expected_score_b = 1.0 - expected_score_a
         new_player_b_elo = player_b_elo + self.elo_k_factor * (player_b_score - expected_score_b)
         
         self.elo_ratings[player_a_name] = new_player_a_elo
         self.elo_ratings[player_b_name] = new_player_b_elo
         
-        print(f"Elo 更新 (基于得分 {player_a_score:.2%}):")
+        print(f"Elo 更新 ({player_a_name} vs {player_b_name}, 基于得分 {player_a_score:.2%}):")
         print(f"  - {player_a_name}: {player_a_elo:.0f} -> {new_player_a_elo:.0f} (Δ {new_player_a_elo - player_a_elo:+.1f})")
         print(f"  - {player_b_name}: {player_b_elo:.0f} -> {new_player_b_elo:.0f} (Δ {new_player_b_elo - player_b_elo:+.1f})")
 
@@ -286,39 +356,48 @@ class SelfPlayTrainer:
     def _train_learner(self, loop_number: int):
         """训练学习者模型。"""
         print(f"🏋️  阶段一: 学习者进行 {STEPS_PER_LOOP:,} 步训练...")
-        # 【修复】移除内部进度条，避免与外部冲突
+        
+        start_time = time.time()
+        
         self.model.learn(
             total_timesteps=STEPS_PER_LOOP,
             reset_num_timesteps=False,
-            progress_bar=False 
+            progress_bar=PPO_SHOW_PROGRESS 
         )
+        
+        elapsed_time = time.time() - start_time
+        print(f"✅ 训练完成! 用时: {elapsed_time:.1f}秒, 总步数: {self.model.num_timesteps:,}")
 
     def _evaluate_and_update(self, loop_number: int) -> bool:
         """
-        评估、决策、更新Elo、轮换对手、同步环境的完整流程。
+        【已重构】评估、决策、更新Elo、轮换对手、同步环境的完整流程。
         """
         print(f"\n💾 阶段二: 保存学习者为挑战者模型 -> {os.path.basename(CHALLENGER_PATH)}")
         self.model.save(CHALLENGER_PATH)
         time.sleep(0.5)
         
         print(f"\n⚔️  阶段三: 启动镜像对局评估...")
-        win_rate = evaluate_models(CHALLENGER_PATH, MAIN_OPPONENT_PATH)
+        win_rate = evaluate_models(CHALLENGER_PATH, MAIN_OPPONENT_PATH, show_progress=True)
         
         print(f"\n👑 阶段四: 决策...")
-        challenger_name = "challenger_temp"
-        main_opponent_name = "main_opponent.zip"
+        challenger_name = os.path.basename(CHALLENGER_PATH)
+        main_opponent_name = os.path.basename(MAIN_OPPONENT_PATH)
         
-        main_opponent_elo = self.elo_ratings.get(main_opponent_name, self.default_elo)
-        challenger_initial_elo = main_opponent_elo + 10
-        self.elo_ratings[challenger_name] = challenger_initial_elo
+        # 如果挑战者是第一次出现，给它一个基于主宰者的初始Elo
+        if challenger_name not in self.elo_ratings:
+            main_elo = self.elo_ratings.get(main_opponent_name, self.default_elo)
+            self.elo_ratings[challenger_name] = main_elo
 
+        # 直接更新双方的Elo评分
         self._update_elo(challenger_name, main_opponent_name, win_rate)
         
+        challenger_elo = self.elo_ratings[challenger_name]
+
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
-            challenger_final_elo = self.elo_ratings.pop(challenger_name)
-            self._add_new_opponent(challenger_final_elo)
+            # 挑战者晋升，其Elo分数赋给新的主宰者
+            self._add_new_opponent(challenger_elo) 
             self._update_opponent_weights()
             
             print(f"🔥 发送指令，在所有 {N_ENVS} 个并行环境中更新对手池...")
@@ -340,18 +419,30 @@ class SelfPlayTrainer:
                 raise RuntimeError(f"在更新并行环境中的对手池时发生严重错误: {e}")
 
         else:
-            print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者与对手池保持不变。")
-            self.elo_ratings.pop(challenger_name)
+            print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。")
+            
+            # 关键逻辑：即使挑战失败，主宰者也更新为刚刚训练过的、更强的版本
+            print("... 主宰者模型将更新为刚刚训练过的、更强的版本（即挑战者）。")
+            shutil.copy(CHALLENGER_PATH, MAIN_OPPONENT_PATH)
+            
+            # 同时，将挑战者的Elo分数赋给主宰者
+            self.elo_ratings[main_opponent_name] = self.elo_ratings[challenger_name]
+            
+            # 保存更新后的Elo
             self._save_elo_ratings()
             
-            # 【修复Bug 1】挑战失败时，模型状态回滚到主宰者状态
-            print("... 回滚学习者模型到主宰者状态。")
+            # 从内存中移除临时的挑战者Elo记录
+            if challenger_name in self.elo_ratings:
+                del self.elo_ratings[challenger_name]
+
+            # 加载更新后的主宰者模型，继续下一轮训练
+            # 这一步确保了训练的连续性
             self.model = load_ppo_model_with_hyperparams(
                 MAIN_OPPONENT_PATH,
                 env=self.env,
-                # 【日志修复】确保回滚后日志路径保持一致
                 tensorboard_log=self.tensorboard_log_run_path
             )
+
             return False
 
     def run(self):
@@ -382,7 +473,6 @@ class SelfPlayTrainer:
             print(f"📈 总计成功挑战: {successful_challenges}/{TOTAL_TRAINING_LOOPS}")
             
         finally:
-            # 【修复Bug 2】确保在程序退出前总是保存最新的Elo评分
             print("\n正在保存最终的Elo评分...")
             self._save_elo_ratings()
             if hasattr(self, 'env') and self.env:
