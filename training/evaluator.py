@@ -15,7 +15,8 @@ class EvaluationAgent:
     def __init__(self, model_path: str):
         # 【注意】我们假设模型加载速度足够快，或者在评估期间可以接受这个开销
         # 对于超大规模评估，可能需要更复杂的模型服务化方案
-        self.model = MaskablePPO.load(model_path, device='auto') # 强制使用CPU以减少GPU内存冲突
+        # 【潜在风险 1 修复】强制使用CPU加载评估模型，避免与训练过程抢占GPU资源
+        self.model = MaskablePPO.load(model_path, device='cpu')
         self.name = os.path.basename(model_path)
 
     def predict(self, observation, action_masks, deterministic=True):

@@ -44,6 +44,8 @@ class SelfPlayTrainer:
         """初始化训练器，设置模型和环境为None。"""
         self.model = None
         self.env = None
+        # 【日志修复】为当前训练运行存储唯一的TensorBoard路径
+        self.tensorboard_log_run_path = None
 
         # --- 对手池核心属性 ---
         self.opponent_pool_paths = []
@@ -113,6 +115,10 @@ class SelfPlayTrainer:
 
         for filename in opponent_files:
             full_path = os.path.join(OPPONENT_POOL_DIR, filename)
+            # 【修复Bug 2】新增检查，确保Elo文件中的对手模型物理存在
+            if not os.path.exists(full_path):
+                print(f"警告: Elo中存在但文件缺失: {filename}。跳过。")
+                continue
             self.opponent_pool_paths.append(full_path)
             if filename not in self.elo_ratings:
                 self.elo_ratings[filename] = self.default_elo
@@ -179,7 +185,8 @@ class SelfPlayTrainer:
             weight = np.exp(-elo_diff / ELO_WEIGHT_TEMPERATURE)
             weights.append(weight)
         
-        main_opponent_weight = sum(weights) * 0.5 if weights else 1.0
+        # 【修复Bug 3】将主宰者权重从池总和的50%降至30%，以增加多样性
+        main_opponent_weight = sum(weights) * 0.3 if weights else 1.0
 
         self.opponent_pool_paths_for_env = self.opponent_pool_paths + [MAIN_OPPONENT_PATH]
         all_weights = weights + [main_opponent_weight]
@@ -248,6 +255,12 @@ class SelfPlayTrainer:
         准备用于训练的模型和环境。
         """
         print("\n--- [步骤 2/5] 准备环境和模型 ---")
+        
+        # 【日志修复】为本次训练运行创建唯一的TensorBoard日志路径
+        run_name = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+        self.tensorboard_log_run_path = os.path.join(TENSORBOARD_LOG_PATH, run_name)
+        print(f"TensorBoard 日志将保存到: {self.tensorboard_log_run_path}")
+
         print(f"创建 {N_ENVS} 个并行的训练环境...")
         vec_env_cls = SubprocVecEnv if N_ENVS > 1 else DummyVecEnv
         
@@ -265,7 +278,7 @@ class SelfPlayTrainer:
         self.model = load_ppo_model_with_hyperparams(
             MAIN_OPPONENT_PATH,
             env=self.env,
-            tensorboard_log=TENSORBOARD_LOG_PATH
+            tensorboard_log=self.tensorboard_log_run_path
         )
         
         print("✅ 环境和模型准备完成！")
@@ -295,11 +308,8 @@ class SelfPlayTrainer:
         challenger_name = "challenger_temp"
         main_opponent_name = "main_opponent.zip"
         
-        # 【修复Bug #3】改进Elo逻辑：挑战者初始Elo设为主宰者Elo + 小幅提升
-        # 这反映了挑战者是主宰者训练后的改进版本这一事实
         main_opponent_elo = self.elo_ratings.get(main_opponent_name, self.default_elo)
-        # 给挑战者一个略高的初始Elo，表示它是训练改进的结果
-        challenger_initial_elo = main_opponent_elo + 10  # 小幅提升反映训练改进
+        challenger_initial_elo = main_opponent_elo + 10
         self.elo_ratings[challenger_name] = challenger_initial_elo
 
         self._update_elo(challenger_name, main_opponent_name, win_rate)
@@ -307,7 +317,6 @@ class SelfPlayTrainer:
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
-            # 挑战成功后，其最终Elo被采纳，并从临时key中移出
             challenger_final_elo = self.elo_ratings.pop(challenger_name)
             self._add_new_opponent(challenger_final_elo)
             self._update_opponent_weights()
@@ -325,8 +334,6 @@ class SelfPlayTrainer:
                     print("⚠️ 部分环境未能成功更新对手池。")
 
                 print("🧠 挑战者已成为新主宰者，训练器将继续使用当前模型状态...")
-                # 【修复Bug #1】不重新加载模型，当前的self.model已经是新主宰者
-                # 只需要更新tensorboard日志路径以保持日志连续性
                 return True
 
             except Exception as e:
@@ -334,9 +341,17 @@ class SelfPlayTrainer:
 
         else:
             print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者与对手池保持不变。")
-            # 挑战失败，主宰者Elo已在_update_elo中更新，移除临时的挑战者Elo即可
             self.elo_ratings.pop(challenger_name)
             self._save_elo_ratings()
+            
+            # 【修复Bug 1】挑战失败时，模型状态回滚到主宰者状态
+            print("... 回滚学习者模型到主宰者状态。")
+            self.model = load_ppo_model_with_hyperparams(
+                MAIN_OPPONENT_PATH,
+                env=self.env,
+                # 【日志修复】确保回滚后日志路径保持一致
+                tensorboard_log=self.tensorboard_log_run_path
+            )
             return False
 
     def run(self):
@@ -367,6 +382,9 @@ class SelfPlayTrainer:
             print(f"📈 总计成功挑战: {successful_challenges}/{TOTAL_TRAINING_LOOPS}")
             
         finally:
+            # 【修复Bug 2】确保在程序退出前总是保存最新的Elo评分
+            print("\n正在保存最终的Elo评分...")
+            self._save_elo_ratings()
             if hasattr(self, 'env') and self.env:
                 print("\n--- [步骤 5/5] 清理环境 ---")
                 self.env.close()

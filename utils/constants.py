@@ -61,6 +61,6 @@ ELO_WEIGHT_TEMPERATURE = 100
 # 评估时进行多少局游戏 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 100
 # 挑战者胜率需要超过多少才能取代主宰者
-EVALUATION_THRESHOLD = 0.55 
+EVALUATION_THRESHOLD = 0.53 
 # 评估时使用的并行环境数量 (评估时通常用1个)
 EVALUATION_N_ENVS = 1
