@@ -37,18 +37,14 @@ def act():
                 current_player = env.current_player
                 legal_actions = np.where(info.get('action_mask'))[0]
 
-                if len(legal_actions) == 1:
-                    chosen_action = legal_actions[0]
-                elif len(legal_actions) == 0:
+                if len(legal_actions) == 0:
                     # 无棋可走，提前结束
                     terminated = True
                     info['winner'] = -current_player
                     break
                 else:
-                    # 使用当前模型来预测所有合法动作的价值，并选择最佳动作
-                    all_action_values = model.predict_values(obs, legal_actions)
-                    best_action_index = np.argmax(all_action_values)
-                    chosen_action = legal_actions[best_action_index]
+                    # 使用新的predict方法，其中包含了epsilon-贪心策略
+                    chosen_action = model.predict(obs, legal_actions)
                     
                 # 将当前状态和选择的动作存储到当前玩家的轨迹中
                 obs_with_action = obs['scalars'].copy()

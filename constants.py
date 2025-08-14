@@ -23,8 +23,7 @@ HISTORY_WINDOW_SIZE = 15
 # --- 训练超参数 ---
 XPID = 'dark_chess_self_play'
 SAVEDIR = 'saved_models'
-SAVE_INTERVAL_MIN = 30 # 每30分钟保存一次模型
-TOTAL_FRAMES = 1000000 # 训练的总步数
+TOTAL_FRAMES = 100000 # 训练的总步数
 EXP_EPSILON = 0.01 # 探索概率
 BATCH_SIZE = 32
 UNROLL_LENGTH = 100 # Rollout的展开长度

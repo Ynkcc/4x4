@@ -4,10 +4,11 @@ import torch.nn as nn
 import numpy as np
 from torch.nn import functional as F
 from typing import Dict, Tuple
+import random
 
 # 导入自定义常量
 from constants import (NETWORK_NUM_HIDDEN_CHANNELS, NETWORK_NUM_RES_BLOCKS, 
-                        LSTM_HIDDEN_SIZE, ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE)
+                        LSTM_HIDDEN_SIZE, ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE, EXP_EPSILON)
 
 class ResidualBlock(nn.Module):
     """
@@ -161,17 +162,19 @@ class Model:
     
     def predict(self, obs, legal_actions) -> int:
         """
-        根据价值预测选择最佳动作。
+        根据价值预测选择最佳动作（epsilon-贪心）。
         """
         if len(legal_actions) == 1:
             return legal_actions[0]
         
-        # 预测所有合法动作的价值
-        all_action_values = self.predict_values(obs, legal_actions)
-        
-        # 选择价值最高的动作
-        best_action_index = np.argmax(all_action_values)
-        return legal_actions[best_action_index]
+        if random.random() < EXP_EPSILON:
+            # 探索：随机选择一个合法动作
+            return random.choice(legal_actions)
+        else:
+            # 贪心：预测所有合法动作的价值并选择价值最高的
+            all_action_values = self.predict_values(obs, legal_actions)
+            best_action_index = np.argmax(all_action_values)
+            return legal_actions[best_action_index]
     
     def share_memory(self):
         self.network.share_memory()
