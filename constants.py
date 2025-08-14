@@ -50,3 +50,5 @@ NUM_IMPERFECT_INFO_ROLLOUTS = 5
 # --- 日志配置 ---
 TENSORBOARD_LOG_DIR = 'tensorboard_logs'
 LOG_INTERVAL_SEC = 10
+# 新增: 每隔多少 frames 更新一次日志和进度条
+LOG_INTERVAL_FRAMES = 10000

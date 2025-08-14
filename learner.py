@@ -5,6 +5,7 @@ import threading
 import pprint
 from collections import deque
 import numpy as np
+from tqdm import tqdm
 
 import torch
 from torch import multiprocessing as mp
@@ -61,7 +62,10 @@ def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_write
     board_obs = torch.flatten(batch['board'].to(device), 0, 1)
     scalars_obs = torch.flatten(batch['scalars'].to(device), 0, 1)
     target = torch.flatten(batch['target'].to(device), 0, 1)
-
+    
+    # 从批次中获取回合长度，并过滤掉填充的0值
+    episode_lengths = batch['episode_length'][batch['episode_length'] > 0]
+    
     with lock:
         values = learner_model.network({'board': board_obs, 'scalars': scalars_obs}).squeeze(-1)
         loss = compute_loss(values, target)
@@ -79,11 +83,19 @@ def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_write
         writer.add_scalar('train/loss', loss.item(), current_frames)
         writer.add_scalar('train/mean_target_value', target.mean().item(), current_frames)
         
+        # 如果有有效的回合长度数据，则记录平均回合长度
+        if episode_lengths.numel() > 0:
+            mean_ep_len = episode_lengths.float().mean().item()
+            writer.add_scalar('rollout/ep_len_mean', mean_ep_len, current_frames)
+        
         stats = {
             'frames': current_frames,
             'loss': loss.item(),
             'mean_target_value': target.mean().item(),
         }
+        if episode_lengths.numel() > 0:
+             stats['ep_len_mean'] = mean_ep_len
+             
         file_writer.log(stats)
         
         total_frames.value += BATCH_SIZE * UNROLL_LENGTH
@@ -126,6 +138,7 @@ def train():
         'board': [torch.empty((UNROLL_LENGTH, *env.observation_space['board'].shape), dtype=torch.float32).share_memory_() for _ in range(NUM_BUFFERS)],
         'scalars': [torch.empty((UNROLL_LENGTH, *env.observation_space['scalars'].shape), dtype=torch.float32).share_memory_() for _ in range(NUM_BUFFERS)],
         'target': [torch.empty((UNROLL_LENGTH,), dtype=torch.float32).share_memory_() for _ in range(NUM_BUFFERS)],
+        'episode_length': [torch.empty((UNROLL_LENGTH,), dtype=torch.int32).fill_(0).share_memory_() for _ in range(NUM_BUFFERS)],
     }
     
     # 创建队列
@@ -166,13 +179,16 @@ def train():
     # 主循环和监控
     try:
         os.makedirs(SAVEDIR, exist_ok=True)
-        last_log_time = time.time()
-        while total_frames.value < TOTAL_FRAMES:
-            time.sleep(LOG_INTERVAL_SEC)
-            current_frames = total_frames.value
-            if time.time() - last_log_time > LOG_INTERVAL_SEC:
-                print(f"训练步数: {current_frames}, 损失: {learner_model.network.loss}")
-                last_log_time = time.time()
+        # 使用 tqdm 创建进度条
+        with tqdm(total=TOTAL_FRAMES, desc="训练进度") as pbar:
+            last_frames = 0
+            while total_frames.value < TOTAL_FRAMES:
+                # 每隔一定的帧数更新一次进度条
+                current_frames = total_frames.value
+                if current_frames - last_frames >= LOG_INTERVAL_FRAMES:
+                    pbar.update(current_frames - last_frames)
+                    last_frames = current_frames
+                time.sleep(1) # 小暂停以避免忙等
 
     except KeyboardInterrupt:
         print("训练中断")

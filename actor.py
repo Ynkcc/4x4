@@ -47,10 +47,11 @@ def act(actor_id, device, free_queue, full_queue, model, buffers):
         env = GameEnvironment()
         
         obs, info = env.reset()
+        episode_steps = 0
         
         while True:
             # 收集一个回合的数据
-            batch_data = {'board': [], 'scalars': [], 'target': []}
+            batch_data = {'board': [], 'scalars': [], 'target': [], 'episode_length': []}
             
             while len(batch_data['board']) < T:
                 legal_actions = np.where(env.action_masks())[0]
@@ -79,8 +80,10 @@ def act(actor_id, device, free_queue, full_queue, model, buffers):
                 
                 # 执行选定的动作
                 obs, _, terminated, truncated, info = env.step(best_action)
+                episode_steps += 1
 
                 if terminated or truncated:
+                    batch_data['episode_length'].append(episode_steps)
                     break
             
             # 将收集到的数据放入缓冲区
@@ -94,11 +97,18 @@ def act(actor_id, device, free_queue, full_queue, model, buffers):
                 buffers['scalars'][index][:len(batch_data['scalars'])] = torch.from_numpy(np.stack(batch_data['scalars'])).to(device)
                 buffers['target'][index][:len(batch_data['target'])] = torch.from_numpy(np.stack(batch_data['target'])).to(device)
                 
+                # 存储回合长度。由于每个批次可能包含多个回合，我们只记录结束的回合长度，其余填充0
+                episode_lengths_tensor = torch.zeros(UNROLL_LENGTH, dtype=torch.int32)
+                end_index = len(batch_data['episode_length'])
+                episode_lengths_tensor[:end_index] = torch.from_numpy(np.array(batch_data['episode_length'], dtype=np.int32))
+                buffers['episode_length'][index] = episode_lengths_tensor.to(device)
+                
                 full_queue.put(index)
             
             # 游戏结束，重置环境
             if terminated or truncated:
                 obs, info = env.reset()
+                episode_steps = 0
 
     except KeyboardInterrupt:
         pass
