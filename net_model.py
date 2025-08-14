@@ -1,3 +1,4 @@
+# src_code/net_model.py
 import torch as th
 import torch.nn as nn
 import numpy as np
@@ -47,7 +48,7 @@ class CustomNetwork(nn.Module):
         
         # --- MLP 分支定义 (处理标量信息) ---
         # 减去历史动作向量的维度
-        mlp_input_dim = scalars_shape[0] - (HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE)
+        mlp_input_dim = scalars_shape[0] - ((HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE)
         self.mlp = nn.Sequential(
             nn.Linear(mlp_input_dim, 64),
             nn.ReLU(),
@@ -81,8 +82,8 @@ class CustomNetwork(nn.Module):
         scalars_obs = observations['scalars']
         
         # 提取历史动作向量和剩余标量
-        history_vector = scalars_obs[:, -HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE:].view(-1, HISTORY_WINDOW_SIZE, ACTION_SPACE_SIZE)
-        other_scalars = scalars_obs[:, :-HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE]
+        history_vector_with_action = scalars_obs[:, -(HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE:].view(-1, HISTORY_WINDOW_SIZE + 1, ACTION_SPACE_SIZE)
+        other_scalars = scalars_obs[:, :-(HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE]
 
         # 1. CNN分支处理棋盘图像
         cnn_features = self.cnn(board_obs)
@@ -92,7 +93,7 @@ class CustomNetwork(nn.Module):
         mlp_features = self.mlp(other_scalars)
         
         # 3. LSTM分支处理历史动作
-        lstm_output, _ = self.lstm(history_vector)
+        lstm_output, _ = self.lstm(history_vector_with_action)
         lstm_features = lstm_output[:, -1, :] # 取最后一个时间步的输出
 
         # 4. 融合所有特征
@@ -120,30 +121,41 @@ class Model:
     def predict_values(self, obs: Dict[str, np.ndarray], legal_actions: np.ndarray) -> np.ndarray:
         """
         为所有合法动作预测价值。
+        此方法遵循 DouZero 的核心思想：一次性为所有合法动作生成预测。
+        它通过复制当前观察状态并修改其中的历史动作向量来模拟每个合法动作后的情景。
         """
+        if not legal_actions.any():
+            # 没有合法动作，返回一个空数组
+            return np.array([])
+        
         with th.no_grad():
-            board_obs = th.from_numpy(obs['board']).float().unsqueeze(0).to(self.device)
-            scalars_obs = th.from_numpy(obs['scalars']).float().unsqueeze(0).to(self.device)
-            
-            # 为每个合法动作创建一个观察批次
             num_legal_actions = len(legal_actions)
-            board_batch = board_obs.repeat(num_legal_actions, 1, 1, 1)
-            scalars_batch = scalars_obs.repeat(num_legal_actions, 1)
+
+            # 将单个numpy观察转换为torch张量，并为所有合法动作复制成一个批次
+            board_obs_tensor = th.from_numpy(obs['board']).float().unsqueeze(0).to(self.device)
+            scalars_obs_tensor = th.from_numpy(obs['scalars']).float().unsqueeze(0).to(self.device)
             
-            # 临时修改历史动作向量以模拟每个合法动作后的状态
-            # 这是一种简化的处理方式，更严谨的做法是需要环境拷贝和rollout
-            history_vector_batch = scalars_batch[:, -HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE:]
-            for i, action in enumerate(legal_actions):
-                # 将最后一个动作替换为当前合法动作
-                history_vector_batch[i, -(ACTION_SPACE_SIZE - action)] = 1.0
-                history_vector_batch[i, -ACTION_SPACE_SIZE:] = 0.0
-                history_vector_batch[i, -ACTION_SPACE_SIZE + action] = 1.0
+            board_batch = board_obs_tensor.repeat(num_legal_actions, 1, 1, 1)
+            scalars_batch = scalars_obs_tensor.repeat(num_legal_actions, 1)
             
+            # 获取动作槽位的起始索引
+            action_slot_start = scalars_batch.shape[1] - ACTION_SPACE_SIZE
+            
+            # 对于批次中的每一个观察，修改其动作槽位以反映对应的合法动作
+            for i, action_index in enumerate(legal_actions):
+                # 将动作槽位清零
+                scalars_batch[i, action_slot_start:] = 0.0
+                
+                # 设置对应合法动作的one-hot位为1
+                scalars_batch[i, action_slot_start + action_index] = 1.0
+
+            # 构建最终的批次观察字典
             obs_batch = {
                 'board': board_batch,
-                'scalars': th.cat([scalars_batch[:, :-HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE], history_vector_batch], dim=1)
+                'scalars': scalars_batch
             }
             
+            # 将批次化的观察送入网络，获取所有合法动作的价值
             values = self.network(obs_batch)
             return values.cpu().numpy().flatten()
     

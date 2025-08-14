@@ -1,3 +1,4 @@
+# src_code/environment.py
 import random
 from enum import Enum
 import numpy as np
@@ -78,8 +79,8 @@ class GameEnvironment(gym.Env):
         num_channels = NUM_PIECE_TYPES * 2 + 2
         board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
         # 标量状态的维度
-        # 原始标量 (3) + 我方存活 (8) + 敌方存活 (8) + 历史动作 (HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE)
-        scalar_shape = (3 + 8 + 8 + HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE, )
+        # 原始标量 (3) + 我方存活 (8) + 敌方存活 (8) + 历史动作 (HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE
+        scalar_shape = (3 + 8 + 8 + (HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE, )
         self.observation_space = spaces.Dict({
             "board": spaces.Box(low=0.0, high=1.0, shape=board_shape, dtype=np.float32),
             "scalars": spaces.Box(low=0.0, high=1.0, shape=scalar_shape, dtype=np.float32)
@@ -245,14 +246,17 @@ class GameEnvironment(gym.Env):
 
     def _get_action_history_vector(self):
         """
-        将历史动作序列编码为固定长度的向量。
-        我们使用one-hot编码来表示每个动作。
+        将历史动作序列编码为固定长度的向量，并添加一个额外的空槽位用于动作填充。
         """
+        # 截取最近的 HISTORY_WINDOW_SIZE 个历史动作
         history = self.action_history[-HISTORY_WINDOW_SIZE:]
-        history_vector = np.zeros(HISTORY_WINDOW_SIZE * ACTION_SPACE_SIZE, dtype=np.float32)
+        
+        # 历史动作向量的大小为 (HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE
+        # 额外的一个 ACTION_SPACE_SIZE 空间用于在训练时拼接动作
+        history_vector = np.zeros((HISTORY_WINDOW_SIZE + 1) * ACTION_SPACE_SIZE, dtype=np.float32)
 
+        # 编码历史动作
         for i, action in enumerate(history):
-            # 将动作索引映射到 one-hot 向量
             start_index = i * ACTION_SPACE_SIZE
             history_vector[start_index + action] = 1.0
 

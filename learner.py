@@ -13,9 +13,20 @@ def compute_loss(values, targets):
     """计算均方误差损失"""
     return ((values.squeeze(-1) - targets)**2).mean()
 
+def check_batch_consistency(batch):
+    """
+    检查批次数据的形状和类型，确保输入正确。
+    """
+    if not isinstance(batch, dict) or 'board' not in batch or 'scalars' not in batch or 'target' not in batch:
+        raise ValueError("批次数据格式不正确，应为包含 'board', 'scalars', 'target' 的字典。")
+    if not all(isinstance(v, torch.Tensor) for v in batch.values()):
+        raise ValueError("批次数据中的值必须是torch.Tensor。")
+
 def learn(learner_model, optimizer, batch):
     """执行一步学习（优化）"""
     device = learner_model.device
+    
+    check_batch_consistency(batch)
     
     board_obs = batch['board'].to(device)
     scalars_obs = batch['scalars'].to(device)
@@ -23,6 +34,7 @@ def learn(learner_model, optimizer, batch):
     
     learner_model.network.train()
     
+    # 网络的输入是状态特征和动作特征的组合，在这里表现为board和包含动作编码的scalars
     values = learner_model.network({'board': board_obs, 'scalars': scalars_obs}).squeeze(-1)
     loss = compute_loss(values, target)
     
@@ -55,9 +67,17 @@ def train():
     if os.path.exists(model_path):
         print(f"检测到已存在模型，从 {model_path} 加载。")
         try:
-            # 加载整个模型而不是只加载state_dict
-            learner_model = Model(env.observation_space, device)
-            learner_model.network = torch.load(model_path, map_location=device)
+            # 检查模型文件中保存的是完整模型还是state_dict
+            loaded_data = torch.load(model_path, map_location=device, weights_only=False)
+            
+            if isinstance(loaded_data, dict):
+                # 如果是state_dict，正常加载
+                learner_model = Model(env.observation_space, device)
+                learner_model.network.load_state_dict(loaded_data)
+            else:
+                # 如果保存的是完整模型，直接使用加载的网络
+                learner_model = Model(env.observation_space, device)
+                learner_model.network = loaded_data.to(device)
         except Exception as e:
             raise ValueError(f"加载模型失败: {e}")
     else:
@@ -84,8 +104,8 @@ def train():
     # 模拟训练主循环
     try:
         while total_frames < TOTAL_FRAMES:
-            # 假设这里有一个 `get_batch()` 函数能够获取数据
-            # 由于其依赖的 Redis 代码已被移除，此处无法获取数据。
+            # 假设这里有一个 `get_batch()` 函数能够从缓冲区中获取数据
+            # 该批次数据应包含 board、带有动作编码的 scalars 和蒙特卡洛目标值
             batch = None # 模拟无法获取数据
             if batch is None:
                 time.sleep(1)
@@ -106,8 +126,7 @@ def train():
     finally:
         # 训练结束后保存模型
         print(f"训练结束，保存模型到 {model_path}")
-        torch.save(learner_model.network, model_path)
-
-
+        torch.save(learner_model.network.state_dict(), model_path)
+        
 if __name__ == '__main__':
     train()

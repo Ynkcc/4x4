@@ -3,58 +3,17 @@ import os
 import time
 import numpy as np
 import torch
-import random # 导入random库以使用epsilon-greedy
+import random 
 
 from constants import *
 from environment import GameEnvironment
 from net_model import Model
 
-def run_rollout(env, model, player_to_move):
-    """
-    执行一个蒙特卡洛Rollout到游戏结束，并返回最终奖励。
-    在不确定性环境下，此函数在每次Rollout时都会随机化隐藏棋子。
-    已添加 epsilon-贪心探索策略。
-    """
-    rollout_env = env.copy(shuffle_hidden=True)
-    
-    # 确保游戏可以开始
-    action_mask = rollout_env.action_masks()
-    if np.any(action_mask):
-        first_action = np.random.choice(np.where(action_mask)[0])
-        rollout_obs, _, terminated, truncated, info = rollout_env.step(first_action)
-    else:
-        return 0.0 # 游戏无法开始，返回0奖励
-
-    while not terminated and not truncated:
-        legal_actions = np.where(rollout_env.action_masks())[0]
-        if len(legal_actions) == 0:
-            # 无棋可走，提前结束
-            terminated = True
-            info['winner'] = -rollout_env.current_player
-            break
-        
-        rollout_obs = rollout_env.get_state()
-        
-        # --- Epsilon-Greedy 探索策略 ---
-        if random.random() < EXP_EPSILON:
-            best_action = random.choice(legal_actions)
-        else:
-            action_values = model.predict_values(rollout_obs, legal_actions)
-            best_action = legal_actions[np.argmax(action_values)]
-        
-        rollout_obs, _, terminated, truncated, info = rollout_env.step(best_action)
-        
-    final_reward = info.get('winner', 0)
-    if final_reward == player_to_move:
-        return 1.0
-    elif final_reward == -player_to_move:
-        return -1.0
-    return 0.0
-
 def act():
     """
     Actor进程，负责生成训练数据。
-    警告：此函数已移除 Redis 依赖，不再能将数据推送到队列。
+    此函数已修改为遵循 DouZero 的 Deep Monte Carlo (DMC) 方法。
+    它将执行完整的游戏局，并使用游戏的最终结果作为整个轨迹中所有状态-动作对的目标值。
     """
     try:
         T = UNROLL_LENGTH
@@ -63,48 +22,70 @@ def act():
         # 自动选择设备
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = Model(env.observation_space, device)
-        obs, info = env.reset()
-        episode_steps = 0
+        model.network.eval() # 确保actor模型处于评估模式
         
         while True:
-            # 警告: 已移除模型更新逻辑，模型版本将不会更新。
+            # 为每个玩家存储一个单独的轨迹
+            trajectories = {1: {'board': [], 'scalars': []}, -1: {'board': [], 'scalars': []}}
             
-            batch_data = {'board': [], 'scalars': [], 'target': [], 'episode_length': []}
+            # 启动新游戏
+            obs, info = env.reset()
+            episode_steps = 0
             
-            while len(batch_data['board']) < T:
-                legal_actions = np.where(env.action_masks())[0]
-                if len(legal_actions) == 0:
+            terminated, truncated = False, False
+            while not terminated and not truncated:
+                current_player = env.current_player
+                legal_actions = np.where(info.get('action_mask'))[0]
+
+                if len(legal_actions) == 1:
+                    chosen_action = legal_actions[0]
+                elif len(legal_actions) == 0:
+                    # 无棋可走，提前结束
+                    terminated = True
+                    info['winner'] = -current_player
                     break
+                else:
+                    # 使用当前模型来预测所有合法动作的价值，并选择最佳动作
+                    all_action_values = model.predict_values(obs, legal_actions)
+                    best_action_index = np.argmax(all_action_values)
+                    chosen_action = legal_actions[best_action_index]
+                    
+                # 将当前状态和选择的动作存储到当前玩家的轨迹中
+                obs_with_action = obs['scalars'].copy()
                 
-                action_rewards = []
-                for action in legal_actions:
-                    rewards = []
-                    for _ in range(NUM_IMPERFECT_INFO_ROLLOUTS):
-                        rewards.append(run_rollout(env, model, env.current_player))
+                action_slot_start = obs_with_action.shape[0] - ACTION_SPACE_SIZE
+                
+                obs_with_action[action_slot_start:] = 0.0
+                obs_with_action[action_slot_start + chosen_action] = 1.0
 
-                    action_rewards.append(np.mean(rewards))
-
-                best_action = legal_actions[np.argmax(action_rewards)]
-                target_value = np.max(action_rewards)
+                trajectories[current_player]['board'].append(obs['board'])
+                trajectories[current_player]['scalars'].append(obs_with_action)
                 
-                batch_data['board'].append(obs['board'])
-                batch_data['scalars'].append(obs['scalars'])
-                batch_data['target'].append(target_value)
-                
-                obs, _, terminated, truncated, info = env.step(best_action)
+                # 执行动作
+                obs, _, terminated, truncated, info = env.step(chosen_action)
                 episode_steps += 1
+            
+            # --- 游戏结束，应用蒙特卡洛目标值 ---
+            winner = info.get('winner', 0)
+            
+            # 根据胜负结果为每个玩家分配奖励
+            for player_id in trajectories.keys():
+                trajectory = trajectories[player_id]
+                
+                if player_id == winner:
+                    target_value = 1.0
+                elif winner == 0:
+                    target_value = 0.0
+                else:
+                    target_value = -1.0
 
-                if terminated or truncated:
-                    batch_data['episode_length'].append(episode_steps)
-                    break
-            
-            if len(batch_data['board']) > 0:
-                # 警告: 已移除将数据推送到队列的逻辑。数据将不会被保存或传输。
-                print(f"Actor 生成了 {len(batch_data['board'])} 个数据点，但未将其保存。")
-            
-            if terminated or truncated:
-                obs, info = env.reset()
-                episode_steps = 0
+                trajectory['target'] = [target_value] * len(trajectory['board'])
+                
+                # 在此可以实现将数据发送到队列的逻辑，例如：
+                # data_queue.put(trajectory)
+                if len(trajectory['board']) > 0:
+                    print(f"Actor 生成了玩家 {player_id} 的完整游戏轨迹，长度为 {len(trajectory['board'])}。")
+                    # data_queue.put(trajectory)
 
     except KeyboardInterrupt:
         pass
