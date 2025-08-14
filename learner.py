@@ -9,11 +9,34 @@ import numpy as np
 import torch
 from torch import multiprocessing as mp
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 
 from constants import *
 from environment import GameEnvironment
 from net_model import Model
-from actor import act # 从新文件导入 act 函数
+from actor import act
+
+# file_writer.py
+# 一个简化的文件写入类，用于将日志写入CSV文件
+class FileWriter:
+    def __init__(self, log_dir, xpid):
+        self.log_dir = os.path.join(log_dir, xpid)
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.log_path = os.path.join(self.log_dir, 'logs.csv')
+        self.file = open(self.log_path, 'w')
+        self.fieldnames = None
+        
+    def log(self, to_log):
+        if self.fieldnames is None:
+            self.fieldnames = sorted(to_log.keys())
+            self.file.write(','.join(self.fieldnames) + '\n')
+        
+        row = [str(to_log.get(k, '')) for k in self.fieldnames]
+        self.file.write(','.join(row) + '\n')
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
 def get_batch(free_queue, full_queue, buffers, lock):
     """从缓冲区获取一个训练批次"""
@@ -31,9 +54,9 @@ def compute_loss(values, targets):
     """计算均方误差损失"""
     return ((values.squeeze(-1) - targets)**2).mean()
 
-def learn(actor_model, learner_model, optimizer, batch, lock):
+def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_writer, total_frames):
     """执行一步学习（优化）"""
-    device = torch.device('cpu' if TRAINING_DEVICE == 'cpu' else f'cuda:{TRAINING_DEVICE}')
+    device = torch.device('cuda:'+str(TRAINING_DEVICE) if TRAINING_DEVICE != 'cpu' else 'cpu')
     
     board_obs = torch.flatten(batch['board'].to(device), 0, 1)
     scalars_obs = torch.flatten(batch['scalars'].to(device), 0, 1)
@@ -51,7 +74,21 @@ def learn(actor_model, learner_model, optimizer, batch, lock):
         # 将更新后的模型参数同步给Actor模型
         actor_model.network.load_state_dict(learner_model.network.state_dict())
         
-        return {'loss': loss.item()}
+        # 记录日志
+        current_frames = total_frames.value
+        writer.add_scalar('train/loss', loss.item(), current_frames)
+        writer.add_scalar('train/mean_target_value', target.mean().item(), current_frames)
+        
+        stats = {
+            'frames': current_frames,
+            'loss': loss.item(),
+            'mean_target_value': target.mean().item(),
+        }
+        file_writer.log(stats)
+        
+        total_frames.value += BATCH_SIZE * UNROLL_LENGTH
+        
+        return stats
 
 def train():
     """主训练函数"""
@@ -64,7 +101,7 @@ def train():
     print("启动训练...")
     
     # 初始化模型
-    device = torch.device('cpu' if TRAINING_DEVICE == 'cpu' else f'cuda:{TRAINING_DEVICE}')
+    device = torch.device('cuda:' + str(TRAINING_DEVICE) if TRAINING_DEVICE != 'cpu' else 'cpu')
     env = GameEnvironment()
     learner_model = Model(env.observation_space, device)
     
@@ -78,7 +115,7 @@ def train():
     )
     
     # 初始化Actor模型
-    actor_device_ids = ['cpu'] if ACTOR_DEVICE_CPU else [int(i) for i in GPU_DEVICES.split(',')]
+    actor_device_ids = [int(i) for i in GPU_DEVICES.split(',')] if not ACTOR_DEVICE_CPU else ['cpu']
     actor_models = {}
     for dev_id in actor_device_ids:
         actor_models[dev_id] = Model(env.observation_space, dev_id)
@@ -95,6 +132,7 @@ def train():
     ctx = mp.get_context('spawn')
     free_queue = ctx.SimpleQueue()
     full_queue = ctx.SimpleQueue()
+    total_frames = ctx.Value('i', 0)
 
     # 启动Actor进程
     actor_processes = []
@@ -114,23 +152,12 @@ def train():
     # 启动Learner线程
     threads = []
     lock = threading.Lock()
-    
-    def learner_thread():
-        while True:
-            try:
-                batch = get_batch(free_queue, full_queue, buffers, lock)
-                if batch is None:
-                    continue
-                result = learn(actor_models['cpu'], learner_model, optimizer, batch, lock)
-                if result:
-                    print(f"Loss: {result['loss']:.6f}")
-            except Exception as e:
-                print(f"Learner thread error: {e}")
-                break
-    
+    writer = SummaryWriter(log_dir=TENSORBOARD_LOG_DIR)
+    file_writer = FileWriter(os.path.join(SAVEDIR, 'logs'), XPID)
+
     for i in range(NUM_THREADS):
         thread = threading.Thread(
-            target=learner_thread,
+            target=lambda: learn(actor_models[0], learner_model, optimizer, get_batch(free_queue, full_queue, buffers, lock), lock, writer, file_writer, total_frames),
             name=f'learner-thread-{i}'
         )
         thread.start()
@@ -139,16 +166,19 @@ def train():
     # 主循环和监控
     try:
         os.makedirs(SAVEDIR, exist_ok=True)
-        last_save_time = time.time()
-        while True:
-            time.sleep(10)
-            if time.time() - last_save_time > SAVE_INTERVAL_MIN * 60:
-                print("保存模型...")
-                torch.save(learner_model.network.state_dict(), os.path.join(SAVEDIR, 'model.pt'))
-                last_save_time = time.time()
+        last_log_time = time.time()
+        while total_frames.value < TOTAL_FRAMES:
+            time.sleep(LOG_INTERVAL_SEC)
+            current_frames = total_frames.value
+            if time.time() - last_log_time > LOG_INTERVAL_SEC:
+                print(f"训练步数: {current_frames}, 损失: {learner_model.network.loss}")
+                last_log_time = time.time()
+
     except KeyboardInterrupt:
         print("训练中断")
     finally:
+        writer.close()
+        file_writer.close()
         for p in actor_processes:
             p.join()
         for t in threads:

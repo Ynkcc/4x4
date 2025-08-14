@@ -111,6 +111,7 @@ class Model:
         self.device = device
         self.network = CustomNetwork(observation_space['board'].shape, observation_space['scalars'].shape).to(device)
         self.network.eval()
+        self.loss = 0.0
     
     def to(self, device):
         self.device = device

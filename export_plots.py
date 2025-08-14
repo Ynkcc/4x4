@@ -106,7 +106,7 @@ setup_chinese_fonts()
 # --- 配置 ---
 # 1. 设置你的 TensorBoard 日志目录 (与你的模型训练配置一致)
 #    这个路径是相对于你运行此脚本的位置的。
-log_dir = "./tensorboard_logs/self_play_final/"
+log_dir = "./tensorboard_logs/"
 
 # 2. 设置保存图像的输出目录
 output_dir = "./training_plots/"
