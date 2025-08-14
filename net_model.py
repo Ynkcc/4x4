@@ -1,10 +1,11 @@
 import torch as th
 import torch.nn as nn
+import numpy as np
 from torch.nn import functional as F
 from typing import Dict, Tuple
 
 # 导入自定义常量
-from .constants import (NETWORK_NUM_HIDDEN_CHANNELS, NETWORK_NUM_RES_BLOCKS, 
+from constants import (NETWORK_NUM_HIDDEN_CHANNELS, NETWORK_NUM_RES_BLOCKS, 
                         LSTM_HIDDEN_SIZE, ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE)
 
 class ResidualBlock(nn.Module):

@@ -37,11 +37,11 @@ MOMENTUM = 0
 EPSILON = 1e-5 # RMSProp epsilon
 
 # --- 硬件配置 ---
-ACTOR_DEVICE_CPU = False # 是否使用CPU作为Actor设备
-GPU_DEVICES = '0' # GPU设备ID
+ACTOR_DEVICE_CPU = True # 是否使用CPU作为Actor设备
+GPU_DEVICES = 'cpu' # GPU设备ID，设置为cpu表示使用CPU
 NUM_ACTOR_DEVICES = 1 # 用于模拟的设备数量
-NUM_ACTORS = 5 # 每个设备的Actor进程数
-TRAINING_DEVICE = '0' # 用于训练的GPU设备ID, 'cpu'表示使用CPU
+NUM_ACTORS = 2 # 每个设备的Actor进程数，CPU下减少进程数
+TRAINING_DEVICE = 'cpu' # 用于训练的GPU设备ID, 'cpu'表示使用CPU
 
 # --- 蒙特卡洛 Rollout 超参数 ---
 # 每次Rollout时，对所有暗棋进行重新随机化的次数

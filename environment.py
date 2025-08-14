@@ -6,7 +6,7 @@ from gymnasium import spaces
 from typing import Optional
 
 # 从新文件导入常量
-from .constants import (WINNING_SCORE, MAX_CONSECUTIVE_MOVES_FOR_DRAW, MAX_STEPS_PER_EPISODE,
+from constants import (WINNING_SCORE, MAX_CONSECUTIVE_MOVES_FOR_DRAW, MAX_STEPS_PER_EPISODE,
                         ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE)
 
 
