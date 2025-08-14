@@ -1,4 +1,3 @@
-# human_vs_ai.py - 人机对战GUI版本 (已增强界面并优化交互)
 import sys
 import os
 import time
@@ -12,20 +11,21 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtCore import Qt, QSize, QTimer
 import numpy as np
+import torch as th
 
 # 【修复】导入游戏环境的路径
-from game.environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
+from .environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
                               ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
                               MAX_CONSECUTIVE_MOVES_FOR_DRAW)
 
-# 导入AI模型
+# 导入新的AI模型
 try:
-    from sb3_contrib import MaskablePPO
+    from .net_model import Model, CustomNetwork
     AI_AVAILABLE = True
     print("AI模型支持已加载")
 except ImportError:
     AI_AVAILABLE = False
-    print("警告: 未找到AI模型库(sb3_contrib)，只能进行人人对战")
+    print("警告: 未找到AI模型库(model.py)，只能进行人人对战")
 
 class BitboardGridWidget(QWidget):
     """一个专门用于可视化单个bitboard的4x4网格小部件。"""
@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("游戏模式:", self.mode_combo)
 
         # AI模型路径
-        self.model_path_edit = QLineEdit("./models/self_play_final/main_opponent.zip")
+        self.model_path_edit = QLineEdit("./models/self_play_final/model.pt")
         self.model_path_edit.setPlaceholderText("输入AI模型文件路径")
         ai_layout.addRow("AI模型路径:", self.model_path_edit)
 
@@ -277,7 +277,7 @@ class MainWindow(QMainWindow):
     def load_ai_model(self):
         """加载AI模型。"""
         if not AI_AVAILABLE:
-            self.log_message("错误: 未安装AI模型库 (pip install sb3-contrib)")
+            self.log_message("错误: 未安装AI模型库 (model.py)")
             return
 
         model_path = self.model_path_edit.text().strip()
@@ -286,8 +286,9 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # 【移除】不再需要模型兼容性设置
-            self.ai_model = MaskablePPO.load(model_path)
+            device = th.device("cuda" if th.cuda.is_available() else "cpu")
+            self.ai_model = Model(self.game.observation_space, device)
+            self.ai_model.network.load_state_dict(th.load(model_path, map_location=device))
             self.ai_status_label.setText("AI状态: 已加载")
             self.log_message(f"成功加载AI模型: {model_path}")
         except Exception as e:
@@ -376,12 +377,11 @@ class MainWindow(QMainWindow):
 
     def make_move(self, action_index):
         """
-        【核心修正】执行一步棋并更新状态。
-        此版本不再使用 game.step()，而是使用更底层的函数来手动控制游戏流程。
+        执行一步棋并更新状态。
         """
         if self.game_over:
             return
-            
+        
         # 记录移动日志
         coords = self.game.action_to_coords.get(action_index)
         player_name = "红方" if self.game.current_player == 1 else "黑方"
@@ -397,16 +397,16 @@ class MainWindow(QMainWindow):
             if defender is None:
                 move_desc = f"将 {attacker_name} 从 {coords[0]} 移动到 {coords[1]}"
             else:
-                defender_name = defender.piece_type.name
+                defender_name = defender.piece_type.name if defender else "未知"
                 move_desc = f"用 {attacker_name} 从 {coords[0]} 吃掉了 {coords[1]} 的 {defender_name}"
         self.log_message(f"{player_name}: {move_desc}")
-
-        # --- 修正逻辑开始 ---
-        # 1. 调用公共方法，只应用一个动作，不触发对手回合
-        _, terminated, truncated, winner = self.game.apply_single_action(action_index)
+        
+        # 执行动作，获取新状态
+        _, _, terminated, truncated, info = self.game.step(action_index)
         self.selected_from_sq = None
+        self.valid_action_mask = info.get('action_mask')
+        winner = info.get('winner')
 
-        # 2. 检查游戏是否在这一步结束
         if terminated or truncated:
             self.game_over = True
             if winner == 1:
@@ -415,22 +415,7 @@ class MainWindow(QMainWindow):
                 self.log_message("--- 游戏结束: 黑方获胜! ---")
             else:
                 self.log_message("--- 游戏结束: 平局! ---")
-        else:
-            # 3. 如果游戏未结束，手动切换玩家
-            self.game.current_player *= -1
-            # 4. 为新玩家获取合法的动作
-            self.valid_action_mask = self.game.action_masks()
-            # 5. 再次检查新玩家是否有棋可走
-            if np.sum(self.valid_action_mask) == 0:
-                self.game_over = True
-                # 当前玩家无棋可走，对手获胜
-                winner = -self.game.current_player
-                winner_name = "红方" if winner == 1 else "黑方"
-                self.log_message(f"--- {player_name} 无棋可走，{winner_name}获胜! ---")
 
-        # --- 修正逻辑结束 ---
-
-        # 更新UI
         self.update_gui()
 
         # 如果游戏没结束且轮到AI，安排AI移动
@@ -461,13 +446,14 @@ class MainWindow(QMainWindow):
         try:
             state = self.game.get_state()
             action_mask = self.valid_action_mask
+            legal_actions = np.where(action_mask)[0]
 
-            if not np.any(action_mask):
+            if len(legal_actions) == 0:
                 self.log_message("AI发现无棋可走，游戏逻辑应已处理此情况。")
                 self.ai_thinking = False
                 return
 
-            action, _ = self.ai_model.predict(state, action_masks=action_mask, deterministic=True)
+            action = self.ai_model.predict(state, legal_actions)
             
             # AI移动后，立即清除思考状态
             self.ai_thinking = False
@@ -521,7 +507,7 @@ class MainWindow(QMainWindow):
                 # --- 已选择棋子：高亮目标位置 ---
                 from_pos_selected = tuple(SQ_TO_POS[self.selected_from_sq])
                 selected_piece = self.game.board[self.selected_from_sq]
-                is_cannon = selected_piece.piece_type == PieceType.CANNON
+                is_cannon = selected_piece and selected_piece.piece_type == PieceType.CANNON
 
                 for action_index, is_valid in enumerate(self.valid_action_mask):
                     if not is_valid: continue
