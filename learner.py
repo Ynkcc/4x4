@@ -1,24 +1,21 @@
 # src_code/learner.py
 import os
 import time
-import threading
-import pprint
-from collections import deque
 import numpy as np
 from tqdm import tqdm
+import argparse
 
 import torch
-from torch import multiprocessing as mp
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from constants import *
 from environment import GameEnvironment
 from net_model import Model
-from actor import act
+from redis_utils import (get_redis_connection, get_buffer_data, push_to_free_queue, 
+                         pop_from_full_queue, clear_redis_queues_and_buffers)
+from model_utils import save_model_to_redis, get_latest_model_from_redis
 
-# file_writer.py
-# 一个简化的文件写入类，用于将日志写入CSV文件
 class FileWriter:
     def __init__(self, log_dir, xpid):
         self.log_dir = os.path.join(log_dir, xpid)
@@ -39,81 +36,83 @@ class FileWriter:
     def close(self):
         self.file.close()
 
-def get_batch(free_queue, full_queue, buffers, lock):
-    """从缓冲区获取一个训练批次"""
-    with lock:
-        indices = [full_queue.get() for _ in range(BATCH_SIZE)]
+def get_batch(redis_conn):
+    """从 Redis 缓冲区获取一个训练批次"""
+    indices = []
+    # 尝试非阻塞地从队列中获取BATCH_SIZE个索引
+    for _ in range(BATCH_SIZE):
+        item = redis_conn.blpop(REDIS_FULL_QUEUE_KEY, timeout=1)
+        if item:
+            indices.append(int(item[1]))
+        else:
+            break
+            
+    if not indices:
+        return None
+
+    batch_list = [get_buffer_data(redis_conn, m) for m in indices]
+    
+    board_list = [torch.from_numpy(np.stack(data['board'])).float() for data in batch_list]
+    scalars_list = [torch.from_numpy(np.stack(data['scalars'])).float() for data in batch_list]
+    target_list = [torch.from_numpy(np.stack(data['target'])).float() for data in batch_list]
+    episode_lengths_list = [l for data in batch_list for l in data['episode_length']]
+    
     batch = {
-        key: torch.stack([buffers[key][m] for m in indices], dim=1)
-        for key in buffers
+        'board': torch.cat(board_list, dim=0),
+        'scalars': torch.cat(scalars_list, dim=0),
+        'target': torch.cat(target_list, dim=0),
+        'episode_length': torch.from_numpy(np.array(episode_lengths_list, dtype=np.int32))
     }
+
     for m in indices:
-        free_queue.put(m)
+        push_to_free_queue(redis_conn, m)
+        
     return batch
+
 
 def compute_loss(values, targets):
     """计算均方误差损失"""
     return ((values.squeeze(-1) - targets)**2).mean()
 
-def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_writer, total_frames):
+def learn(learner_model, optimizer, batch, writer, file_writer, total_frames):
     """执行一步学习（优化）"""
-    device = torch.device('cuda:'+str(TRAINING_DEVICE) if TRAINING_DEVICE != 'cpu' else 'cpu')
+    device = learner_model.device
     
-    board_obs = torch.flatten(batch['board'].to(device), 0, 1)
-    scalars_obs = torch.flatten(batch['scalars'].to(device), 0, 1)
-    target = torch.flatten(batch['target'].to(device), 0, 1)
+    board_obs = batch['board'].to(device)
+    scalars_obs = batch['scalars'].to(device)
+    target = batch['target'].to(device)
     
-    # 从批次中获取回合长度，并过滤掉填充的0值
     episode_lengths = batch['episode_length'][batch['episode_length'] > 0]
     
-    with lock:
-        # 在进行反向传播前，将模型切换到训练模式
-        learner_model.network.train()
-        
-        values = learner_model.network({'board': board_obs, 'scalars': scalars_obs}).squeeze(-1)
-        loss = compute_loss(values, target)
-        
-        optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(learner_model.network.parameters(), MAX_GRAD_NORM)
-        optimizer.step()
+    learner_model.network.train()
+    
+    values = learner_model.network({'board': board_obs, 'scalars': scalars_obs}).squeeze(-1)
+    loss = compute_loss(values, target)
+    
+    optimizer.zero_grad()
+    loss.backward()
+    nn.utils.clip_grad_norm_(learner_model.network.parameters(), MAX_GRAD_NORM)
+    optimizer.step()
 
-        # 在同步模型参数前，将模型切换回评估模式，以保持状态一致
-        learner_model.network.eval()
-        
-        # 将更新后的模型参数同步给Actor模型
-        actor_model.network.load_state_dict(learner_model.network.state_dict())
-        
-        # 记录日志
-        current_frames = total_frames.value
-        writer.add_scalar('train/loss', loss.item(), current_frames)
-        writer.add_scalar('train/mean_target_value', target.mean().item(), current_frames)
-        
-        # 如果有有效的回合长度数据，则记录平均回合长度
-        if episode_lengths.numel() > 0:
-            mean_ep_len = episode_lengths.float().mean().item()
-            writer.add_scalar('rollout/ep_len_mean', mean_ep_len, current_frames)
-        
-        stats = {
-            'frames': current_frames,
-            'loss': loss.item(),
-            'mean_target_value': target.mean().item(),
-        }
-        if episode_lengths.numel() > 0:
-             stats['ep_len_mean'] = mean_ep_len
-             
-        file_writer.log(stats)
-        
-        total_frames.value += BATCH_SIZE * UNROLL_LENGTH
-        
-        return stats
-
-# 【修复】新增一个线程工作函数，用于在无限循环中调用get_batch和learn
-def learner_thread_worker(actor_model, learner_model, optimizer, free_queue, full_queue, buffers, lock, writer, file_writer, total_frames):
-    while True:
-        # 在循环内部调用get_batch，以持续获取新数据
-        batch = get_batch(free_queue, full_queue, buffers, lock)
-        learn(actor_model, learner_model, optimizer, batch, lock, writer, file_writer, total_frames)
+    learner_model.network.eval()
+    
+    current_frames = total_frames
+    writer.add_scalar('train/loss', loss.item(), current_frames)
+    writer.add_scalar('train/mean_target_value', target.mean().item(), current_frames)
+    
+    stats = {
+        'frames': current_frames,
+        'loss': loss.item(),
+        'mean_target_value': target.mean().item(),
+    }
+    if episode_lengths.numel() > 0:
+        mean_ep_len = episode_lengths.float().mean().item()
+        writer.add_scalar('rollout/ep_len_mean', mean_ep_len, current_frames)
+        stats['ep_len_mean'] = mean_ep_len
+         
+    file_writer.log(stats)
+    
+    return stats
 
 
 def train():
@@ -126,12 +125,16 @@ def train():
 
     print("启动训练...")
     
-    # 初始化模型
-    device = torch.device('cuda:' + str(TRAINING_DEVICE) if TRAINING_DEVICE != 'cpu' else 'cpu')
+    redis_conn = get_redis_connection()
+    clear_redis_queues_and_buffers(redis_conn)
+    
+    device = torch.device(f'cuda:{TRAINING_DEVICE}' if TRAINING_DEVICE != 'cpu' else 'cpu')
     env = GameEnvironment()
     learner_model = Model(env.observation_space, device)
     
-    # 创建优化器
+    current_model_version = 0
+    save_model_to_redis(learner_model, current_model_version)
+    
     optimizer = torch.optim.RMSprop(
         learner_model.network.parameters(),
         lr=LEARNING_RATE,
@@ -140,82 +143,45 @@ def train():
         alpha=ALPHA
     )
     
-    # 初始化Actor模型
-    actor_device_ids = [int(i) for i in GPU_DEVICES.split(',')] if not ACTOR_DEVICE_CPU else ['cpu']
-    actor_models = {}
-    for dev_id in actor_device_ids:
-        actor_models[dev_id] = Model(env.observation_space, dev_id)
-        actor_models[dev_id].share_memory()
-        
-    # 创建共享缓冲区
-    buffers = {
-        'board': [torch.empty((UNROLL_LENGTH, *env.observation_space['board'].shape), dtype=torch.float32).share_memory_() for _ in range(NUM_BUFFERS)],
-        'scalars': [torch.empty((UNROLL_LENGTH, *env.observation_space['scalars'].shape), dtype=torch.float32).share_memory_() for _ in range(NUM_BUFFERS)],
-        'target': [torch.empty((UNROLL_LENGTH,), dtype=torch.float32).share_memory_() for _ in range(NUM_BUFFERS)],
-        'episode_length': [torch.empty((UNROLL_LENGTH,), dtype=torch.int32).fill_(0).share_memory_() for _ in range(NUM_BUFFERS)],
-    }
-    
-    # 创建队列
-    ctx = mp.get_context('spawn')
-    free_queue = ctx.SimpleQueue()
-    full_queue = ctx.SimpleQueue()
-    total_frames = ctx.Value('i', 0)
-
-    # 启动Actor进程
-    actor_processes = []
-    for dev_id in actor_device_ids:
-        for i in range(NUM_ACTORS):
-            actor = ctx.Process(
-                target=act,
-                args=(i, dev_id, free_queue, full_queue, actor_models[dev_id], buffers)
-            )
-            actor.start()
-            actor_processes.append(actor)
-
-    # 初始化缓冲区队列
     for i in range(NUM_BUFFERS):
-        free_queue.put(i)
+        push_to_free_queue(redis_conn, i)
 
-    # 启动Learner线程
-    threads = []
-    lock = threading.Lock()
     writer = SummaryWriter(log_dir=TENSORBOARD_LOG_DIR)
     file_writer = FileWriter(os.path.join(SAVEDIR, 'logs'), XPID)
 
-    for i in range(NUM_THREADS):
-        # 【修复】将目标函数修改为新定义的 learner_thread_worker
-        # 线程将持续调用该函数，并在内部循环中获取和处理数据
-        thread = threading.Thread(
-            target=learner_thread_worker,
-            args=(actor_models[0], learner_model, optimizer, free_queue, full_queue, buffers, lock, writer, file_writer, total_frames),
-            name=f'learner-thread-{i}'
-        )
-        thread.start()
-        threads.append(thread)
+    total_frames = 0
+    last_save_time = time.time()
     
-    # 主循环和监控
     try:
         os.makedirs(SAVEDIR, exist_ok=True)
-        # 使用 tqdm 创建进度条
         with tqdm(total=TOTAL_FRAMES, desc="训练进度") as pbar:
             last_frames = 0
-            while total_frames.value < TOTAL_FRAMES:
-                # 每隔一定的帧数更新一次进度条
-                current_frames = total_frames.value
-                if current_frames - last_frames >= LOG_INTERVAL_FRAMES:
-                    pbar.update(current_frames - last_frames)
-                    last_frames = current_frames
-                time.sleep(1) # 小暂停以避免忙等
+            while total_frames < TOTAL_FRAMES:
+                batch = get_batch(redis_conn)
+                if batch is None:
+                    time.sleep(1)
+                    continue
+                
+                learn(learner_model, optimizer, batch, writer, file_writer, total_frames)
+                
+                total_frames += BATCH_SIZE * UNROLL_LENGTH
+                
+                if time.time() - last_save_time > SAVE_INTERVAL_MIN * 60:
+                    current_model_version += 1
+                    save_model_to_redis(learner_model, current_model_version)
+                    last_save_time = time.time()
+
+                if total_frames - last_frames >= LOG_INTERVAL_FRAMES:
+                    pbar.update(total_frames - last_frames)
+                    last_frames = total_frames
+
+            pbar.update(TOTAL_FRAMES - last_frames)
 
     except KeyboardInterrupt:
         print("训练中断")
     finally:
         writer.close()
         file_writer.close()
-        for p in actor_processes:
-            p.join()
-        for t in threads:
-            t.join()
         print("训练结束")
 
 if __name__ == '__main__':

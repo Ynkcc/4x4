@@ -52,3 +52,13 @@ TENSORBOARD_LOG_DIR = 'tensorboard_logs'
 LOG_INTERVAL_SEC = 10
 # 新增: 每隔多少 frames 更新一次日志和进度条
 LOG_INTERVAL_FRAMES = 10000
+
+# --- Redis 配置 ---
+REDIS_HOST = 'localhost'
+REDIS_PORT = 6379
+REDIS_DB = 0
+REDIS_FREE_QUEUE_KEY = f'{XPID}_free_queue'
+REDIS_FULL_QUEUE_KEY = f'{XPID}_full_queue'
+REDIS_BUFFER_KEY = f'{XPID}_buffers'
+REDIS_MODEL_KEY = f'{XPID}_model'
+REDIS_MODEL_VERSION_KEY = f'{XPID}_model_version'
