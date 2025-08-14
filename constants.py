@@ -24,7 +24,7 @@ HISTORY_WINDOW_SIZE = 15
 XPID = 'dark_chess_self_play'
 SAVEDIR = 'training_checkpoints'
 SAVE_INTERVAL_MIN = 30 # 每30分钟保存一次模型
-TOTAL_FRAMES = 1000000000 # 训练的总步数
+TOTAL_FRAMES = 1000000 # 训练的总步数
 EXP_EPSILON = 0.01 # 探索概率
 BATCH_SIZE = 32
 UNROLL_LENGTH = 100 # Rollout的展开长度
@@ -40,7 +40,7 @@ EPSILON = 1e-5 # RMSProp epsilon
 ACTOR_DEVICE_CPU = False # 是否使用CPU作为Actor设备
 GPU_DEVICES = '0' # GPU设备ID
 NUM_ACTOR_DEVICES = 1 # 用于模拟的设备数量
-NUM_ACTORS = 5 # 每个设备的Actor进程数
+NUM_ACTORS = 4 # 每个设备的Actor进程数
 TRAINING_DEVICE = '0' # 用于训练的GPU设备ID, 'cpu'表示使用CPU
 
 # --- 蒙特卡洛 Rollout 超参数 ---

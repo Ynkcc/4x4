@@ -67,6 +67,9 @@ def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_write
     episode_lengths = batch['episode_length'][batch['episode_length'] > 0]
     
     with lock:
+        # 在进行反向传播前，将模型切换到训练模式
+        learner_model.network.train()
+        
         values = learner_model.network({'board': board_obs, 'scalars': scalars_obs}).squeeze(-1)
         loss = compute_loss(values, target)
         
@@ -75,6 +78,9 @@ def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_write
         nn.utils.clip_grad_norm_(learner_model.network.parameters(), MAX_GRAD_NORM)
         optimizer.step()
 
+        # 在同步模型参数前，将模型切换回评估模式，以保持状态一致
+        learner_model.network.eval()
+        
         # 将更新后的模型参数同步给Actor模型
         actor_model.network.load_state_dict(learner_model.network.state_dict())
         
@@ -101,6 +107,14 @@ def learn(actor_model, learner_model, optimizer, batch, lock, writer, file_write
         total_frames.value += BATCH_SIZE * UNROLL_LENGTH
         
         return stats
+
+# 【修复】新增一个线程工作函数，用于在无限循环中调用get_batch和learn
+def learner_thread_worker(actor_model, learner_model, optimizer, free_queue, full_queue, buffers, lock, writer, file_writer, total_frames):
+    while True:
+        # 在循环内部调用get_batch，以持续获取新数据
+        batch = get_batch(free_queue, full_queue, buffers, lock)
+        learn(actor_model, learner_model, optimizer, batch, lock, writer, file_writer, total_frames)
+
 
 def train():
     """主训练函数"""
@@ -169,8 +183,11 @@ def train():
     file_writer = FileWriter(os.path.join(SAVEDIR, 'logs'), XPID)
 
     for i in range(NUM_THREADS):
+        # 【修复】将目标函数修改为新定义的 learner_thread_worker
+        # 线程将持续调用该函数，并在内部循环中获取和处理数据
         thread = threading.Thread(
-            target=lambda: learn(actor_models[0], learner_model, optimizer, get_batch(free_queue, full_queue, buffers, lock), lock, writer, file_writer, total_frames),
+            target=learner_thread_worker,
+            args=(actor_models[0], learner_model, optimizer, free_queue, full_queue, buffers, lock, writer, file_writer, total_frames),
             name=f'learner-thread-{i}'
         )
         thread.start()
