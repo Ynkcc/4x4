@@ -22,7 +22,7 @@ HISTORY_WINDOW_SIZE = 15
 
 # --- 训练超参数 ---
 XPID = 'dark_chess_self_play'
-SAVEDIR = 'training_checkpoints'
+SAVEDIR = 'saved_models'
 SAVE_INTERVAL_MIN = 30 # 每30分钟保存一次模型
 TOTAL_FRAMES = 1000000 # 训练的总步数
 EXP_EPSILON = 0.01 # 探索概率
@@ -37,11 +37,11 @@ MOMENTUM = 0
 EPSILON = 1e-5 # RMSProp epsilon
 
 # --- 硬件配置 ---
-ACTOR_DEVICE_CPU = False # 是否使用CPU作为Actor设备
+ACTOR_DEVICE_CPU = True # 是否使用CPU作为Actor设备
 GPU_DEVICES = '0' # GPU设备ID
 NUM_ACTOR_DEVICES = 1 # 用于模拟的设备数量
 NUM_ACTORS = 4 # 每个设备的Actor进程数
-TRAINING_DEVICE = '0' # 用于训练的GPU设备ID, 'cpu'表示使用CPU
+TRAINING_DEVICE = 'cpu' # 用于训练的GPU设备ID, 'cpu'表示使用CPU
 
 # --- 蒙特卡洛 Rollout 超参数 ---
 # 每次Rollout时，对所有暗棋进行重新随机化的次数
@@ -52,13 +52,3 @@ TENSORBOARD_LOG_DIR = 'tensorboard_logs'
 LOG_INTERVAL_SEC = 10
 # 新增: 每隔多少 frames 更新一次日志和进度条
 LOG_INTERVAL_FRAMES = 10000
-
-# --- Redis 配置 ---
-REDIS_HOST = 'localhost'
-REDIS_PORT = 6379
-REDIS_DB = 0
-REDIS_FREE_QUEUE_KEY = f'{XPID}_free_queue'
-REDIS_FULL_QUEUE_KEY = f'{XPID}_full_queue'
-REDIS_BUFFER_KEY = f'{XPID}_buffers'
-REDIS_MODEL_KEY = f'{XPID}_model'
-REDIS_MODEL_VERSION_KEY = f'{XPID}_model_version'
