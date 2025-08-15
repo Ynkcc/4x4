@@ -28,18 +28,18 @@ TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_fin
 
 # --- 游戏环境超参数 (新增) ---
 # 奖励塑形系数 (初始值)
-SHAPING_COEF_INITIAL = 0.00049
+SHAPING_COEF_INITIAL = 0.5
 # 奖励塑形系数 (衰减后的最终值)
-SHAPING_COEF_FINAL = 0.00001
+SHAPING_COEF_FINAL = 0.01
 # 在第几次训练循环时，塑形系数衰减到最终值 (例如，在总循环数的一半时完成衰减)
-SHAPING_DECAY_END_LOOP = 10
+SHAPING_DECAY_END_LOOP = 50
 
 
 # --- PPO 模型超参数 (基于 stable-baselines3 默认值) ---
 # 学习率 (默认: 3e-4)
-INITIAL_LR = 3e-4
+INITIAL_LR = 1e-4
 # PPO 裁剪范围 (默认: 0.2)
-PPO_CLIP_RANGE = 0.2
+PPO_CLIP_RANGE = 0.1
 # 每次更新收集的步数 (默认: 2048)
 PPO_N_STEPS = 2048
 # 批次大小 (默认: 64)

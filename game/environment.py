@@ -177,7 +177,7 @@ class GameEnvironment(gym.Env):
 
         # 1. 应用学习者的动作
         move_reward, terminated, truncated, winner = self._internal_apply_action(action_index)
-        reward += move_reward
+        reward += self.shaping_coef * move_reward
         
         # 2. 如果游戏在学习者回合直接结束，则不应用塑形奖励，直接返回
         if terminated or truncated:
@@ -220,7 +220,7 @@ class GameEnvironment(gym.Env):
                 try:
                     opp_action, _ = self.active_opponent.predict(obs, action_masks=mask, deterministic=True)
                     opp_reward, terminated, truncated, winner = self._internal_apply_action(int(opp_action))
-                    reward -= opp_reward  # 从学习者的奖励中减去对手的得分
+                    reward -= self.shaping_coef * opp_reward  # 从学习者的奖励中减去对手的得分
                     
                     # 根据游戏结果给予最终奖励
                     if terminated:
@@ -233,7 +233,7 @@ class GameEnvironment(gym.Env):
                     valid_actions = np.where(mask)[0]
                     opp_action = np.random.choice(valid_actions)
                     opp_reward, terminated, truncated, winner = self._internal_apply_action(opp_action)
-                    reward -= opp_reward
+                    reward -= self.shaping_coef * opp_reward
                     print(f"警告: 对手预测失败 ({e}), 已随机选择动作。")
 
         # 5. 切换回学习者视角并返回
@@ -298,7 +298,12 @@ class GameEnvironment(gym.Env):
             return 0.0  # 移动没有奖励
         else:  # 吃子
             points = PIECE_VALUES[defender.piece_type]
-            self.scores[attacker.player] += points
+            if defender.player == attacker.player:
+                opponent = -attacker.player
+                self.scores[opponent] += points
+                points = - points  # 吃自己棋子是负分
+            else:
+                self.scores[attacker.player] += points
             self.board[to_sq], self.board[from_sq] = attacker, None
 
             # 更新被吃棋子的 bit vectors
