@@ -19,7 +19,6 @@ WINNING_SCORE = 60
 MAX_CONSECUTIVE_MOVES_FOR_DRAW = 24
 MAX_STEPS_PER_EPISODE = 100
 
-
 class PieceType(Enum):
     SOLDIER = 0
     CANNON = 1
@@ -28,7 +27,6 @@ class PieceType(Enum):
     ELEPHANT = 4
     ADVISOR = 5
     GENERAL = 6
-
 
 class Piece:
     """棋子对象，存储其类型、所属玩家和是否翻开"""
@@ -40,7 +38,6 @@ class Piece:
         state = 'R' if self.revealed else 'H'
         player_char = 'R' if self.player == 1 else 'B'
         return f"{state}_{player_char}{self.piece_type.name}"
-
 
 BOARD_ROWS, BOARD_COLS = 4, 4
 NUM_PIECE_TYPES = 7
@@ -78,8 +75,7 @@ class GameEnvironment(gym.Env):
     def __init__(self,
                  render_mode=None,
                  opponent_agent: Optional[Any] = None,
-                 opponent_pool: Optional[List[str]] = None,
-                 opponent_weights: Optional[List[float]] = None,
+                 opponent_data: Optional[List[Dict[str, Any]]] = None, # 【修改】新的合并参数
                  shaping_coef: float = 0.1):
         super().__init__()
         self.render_mode = render_mode
@@ -88,9 +84,8 @@ class GameEnvironment(gym.Env):
 
         # 对手配置
         self.opponent_agent_for_eval = opponent_agent
-        self.opponent_pool = opponent_pool if opponent_pool else []
-        self.opponent_weights = opponent_weights if opponent_weights else []
-        self.loaded_opponents: Dict[str, Any] = {}
+        # 【修改】现在只使用一个数据结构
+        self.opponent_data = opponent_data if opponent_data else []
         self.active_opponent: Optional[Any] = None
         if self.opponent_agent_for_eval:
             self.active_opponent = self.opponent_agent_for_eval
@@ -123,40 +118,29 @@ class GameEnvironment(gym.Env):
         self.coords_to_action = {}
         self._initialize_lookup_tables()
 
-    def reload_opponent_pool(self, new_pool: List[str], new_weights: List[float]):
-        """在训练期间从外部动态更新对手池"""
-        self.opponent_pool = new_pool
-        self.opponent_weights = new_weights
-        self.loaded_opponents.clear()
+    # 【修改】新版本的 reload_opponent_pool 方法，只接收一个参数
+    def reload_opponent_pool(self, new_opponent_data: List[Dict[str, Any]]):
+        """在训练期间从外部动态更新对手池数据。"""
+        self.opponent_data = new_opponent_data
         return True
 
     def reset(self, seed=None, options=None):
         """重置游戏到初始状态"""
         super().reset(seed=seed)
 
-        # 如果在训练模式，则根据权重选择一个对手
-        if not self.opponent_agent_for_eval and self.opponent_pool:
-            if MaskablePPO is None:
-                raise ImportError("需要安装 `sb3-contrib` 库来加载对手模型。")
+        if not self.opponent_agent_for_eval and self.opponent_data:
+            # 【修改】使用新的数据结构进行采样
+            paths = [item['path'] for item in self.opponent_data]
+            weights = [item['weight'] for item in self.opponent_data]
             
-            # 归一化权重并选择
-            normalized_weights = np.array(self.opponent_weights) / np.sum(self.opponent_weights)
-            chosen_path = self.np_random.choice(self.opponent_pool, p=normalized_weights)
+            chosen_path = self.np_random.choice(paths, p=weights)
             
-            # 从缓存加载或从磁盘加载
-            if chosen_path in self.loaded_opponents:
-                self.active_opponent = self.loaded_opponents[chosen_path]
-            else:
-                try:
-                    if not os.path.exists(chosen_path):
-                        raise FileNotFoundError(f"找不到对手模型文件: {chosen_path}")
-                    model = MaskablePPO.load(chosen_path, device='cpu')
-                    self.loaded_opponents[chosen_path] = model
-                    self.active_opponent = model
-                except Exception as e:
-                    self.active_opponent = None
-                    raise ValueError(f"环境内错误：加载对手模型 {chosen_path} 失败: {e}。")
-
+            # 【修改】直接从数据中获取预加载的模型实例
+            chosen_model_data = next((item for item in self.opponent_data if item['path'] == chosen_path), None)
+            
+            if chosen_model_data is None:
+                raise ValueError(f"环境内错误：找不到预加载的对手模型 {chosen_path}。")
+            self.active_opponent = chosen_model_data['model']
         elif self.opponent_agent_for_eval:
             self.active_opponent = self.opponent_agent_for_eval
         else:
@@ -169,17 +153,13 @@ class GameEnvironment(gym.Env):
         """执行一步完整的游戏逻辑，并应用奖励塑形"""
         reward = 0.0
         
-        # --- 【核心修改】奖励塑形逻辑 ---
         prev_threat_potential = 0.0
         if self.shaping_coef > 0.0:
-            # 动作前，对手对我方的最大威胁值
             prev_threat_potential = self._get_max_capture_value_for(-self.learning_player_id)
 
-        # 1. 应用学习者的动作
         move_reward, terminated, truncated, winner = self._internal_apply_action(action_index)
         reward += self.shaping_coef * move_reward
         
-        # 2. 如果游戏在学习者回合直接结束，则不应用塑形奖励，直接返回
         if terminated or truncated:
             final_reward = reward
             if terminated:
@@ -192,51 +172,40 @@ class GameEnvironment(gym.Env):
                 'action_mask': self.action_masks()
             }
 
-        # 3. 动作后，重新计算威胁和收益，并计算塑形奖励
         if self.shaping_coef > 0.0:
-            # 动作后对手对我方的最大威胁
             new_threat_potential = self._get_max_capture_value_for(-self.learning_player_id)
-            # 动作后我方能获得的最大收益
             new_benefit_potential = self._get_max_capture_value_for(self.learning_player_id)
 
             denom = WINNING_SCORE if WINNING_SCORE > 0 else 1.0
 
-            # 威胁塑形：(之前的威胁 - 当前的威胁)，鼓励降低被吃的风险
             threat_reward = (prev_threat_potential - new_threat_potential) / denom
-            # 收益塑形：当前能产生的收益，鼓励创造吃子机会
             benefit_reward = new_benefit_potential / denom
             
-            # 应用奖励
             reward += self.shaping_coef * (threat_reward + benefit_reward)
 
-        # 4. 轮到对手行动
         self.current_player *= -1
         if self.active_opponent:
             obs, mask = self.get_state(), self.action_masks()
             if not np.any(mask):
-                # 对手无棋可走，学习者获胜
                 terminated, winner, reward = True, self.learning_player_id, reward + 1.0
             else:
                 try:
                     opp_action, _ = self.active_opponent.predict(obs, action_masks=mask, deterministic=True)
                     opp_reward, terminated, truncated, winner = self._internal_apply_action(int(opp_action))
-                    reward -= self.shaping_coef * opp_reward  # 从学习者的奖励中减去对手的得分
+                    reward -= self.shaping_coef * opp_reward
                     
-                    # 根据游戏结果给予最终奖励
                     if terminated:
                         if winner == self.learning_player_id: reward += 1.0
                         elif winner == -self.learning_player_id: reward += -1.0
                     elif truncated:
                         reward += -0.5
                 except Exception as e:
-                    # 如果对手模型出错，则随机选择一个动作
                     valid_actions = np.where(mask)[0]
                     opp_action = np.random.choice(valid_actions)
                     opp_reward, terminated, truncated, winner = self._internal_apply_action(opp_action)
                     reward -= self.shaping_coef * opp_reward
                     print(f"警告: 对手预测失败 ({e}), 已随机选择动作。")
 
-        # 5. 切换回学习者视角并返回
         self.current_player *= -1
         return self.get_state(), np.float32(reward), terminated, truncated, {
             'winner': winner,
@@ -252,28 +221,23 @@ class GameEnvironment(gym.Env):
         reward = 0.0
 
         if action_index < REVEAL_ACTIONS_COUNT:
-            # 翻棋动作
             self._apply_reveal_update(POS_TO_SQ[self.action_to_coords[action_index]])
             self.move_counter = 0
             reward = 0
         else:
-            # 移动或吃子动作
             from_sq, to_sq = POS_TO_SQ[self.action_to_coords[action_index][0]], POS_TO_SQ[
                 self.action_to_coords[action_index][1]]
             reward = self._apply_move_action(from_sq, to_sq)
 
-        # --- 检查游戏结束条件 ---
         winner, terminated, truncated = None, False, False
         if self.scores[1] >= WINNING_SCORE:
             winner, terminated = 1, True
         elif self.scores[-1] >= WINNING_SCORE:
             winner, terminated = -1, True
 
-        # 检查对手是否无棋可走
         if not terminated and not truncated and not np.any(self.action_masks(-self.current_player)):
             winner, terminated = self.current_player, True
 
-        # 和棋检测
         if not terminated and not truncated and self.move_counter >= MAX_CONSECUTIVE_MOVES_FOR_DRAW:
             winner, terminated = 0, True
         if not terminated and not truncated and self.total_step_counter >= MAX_STEPS_PER_EPISODE:
@@ -286,34 +250,31 @@ class GameEnvironment(gym.Env):
         attacker = self.board[from_sq]
         defender = self.board[to_sq]
 
-        if defender is None:  # 移动
+        if defender is None:
             self.board[to_sq], self.board[from_sq] = attacker, None
-            # 更新 bit vectors
             self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
             self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
             self.revealed_vectors[attacker.player][from_sq] = False
             self.revealed_vectors[attacker.player][to_sq] = True
             self.empty_vector[from_sq], self.empty_vector[to_sq] = True, False
             self.move_counter += 1
-            return 0.0  # 移动没有奖励
-        else:  # 吃子
+            return 0.0
+        else:
             points = PIECE_VALUES[defender.piece_type]
             if defender.player == attacker.player:
                 opponent = -attacker.player
                 self.scores[opponent] += points
-                points = - points  # 吃自己棋子是负分
+                points = - points
             else:
                 self.scores[attacker.player] += points
             self.board[to_sq], self.board[from_sq] = attacker, None
 
-            # 更新被吃棋子的 bit vectors
             if defender.revealed:
                 self.piece_vectors[defender.player][defender.piece_type.value][to_sq] = False
                 self.revealed_vectors[defender.player][to_sq] = False
             else:
                 self.hidden_vector[to_sq] = False
 
-            # 更新攻击方棋子的 bit vectors
             self.piece_vectors[attacker.player][attacker.piece_type.value][from_sq] = False
             self.piece_vectors[attacker.player][attacker.piece_type.value][to_sq] = True
             self.revealed_vectors[attacker.player][from_sq] = False
@@ -322,7 +283,7 @@ class GameEnvironment(gym.Env):
 
             self.dead_pieces[defender.player].append(defender)
             self.move_counter = 0
-            return points / WINNING_SCORE  # 奖励归一化
+            return points / WINNING_SCORE
 
     def _get_max_capture_value_for(self, player_id: int) -> float:
         """【新增】计算指定玩家一步内能吃掉的对方棋子的最大价值"""
@@ -332,13 +293,11 @@ class GameEnvironment(gym.Env):
         valid_actions = np.where(action_mask)[0]
 
         for action in valid_actions:
-            # 只考虑移动/吃子动作
             if action >= REVEAL_ACTIONS_COUNT:
                 coords = self.action_to_coords.get(action)
                 to_sq = POS_TO_SQ[coords[1]]
                 defender = self.board[to_sq]
 
-                # 如果目标位置有对方棋子，更新最大价值
                 if defender is not None and defender.player == opponent_id:
                     value = PIECE_VALUES[defender.piece_type]
                     if value > max_value:
@@ -347,26 +306,20 @@ class GameEnvironment(gym.Env):
 
     def close(self):
         """清理资源"""
-        self.loaded_opponents.clear()
         self.active_opponent = None
 
     def get_state(self):
         """获取当前玩家视角的观察状态"""
         my_player, opponent_player = self.current_player, -self.current_player
 
-        # --- 棋盘状态 (16, 4, 4) ---
         board_state_list = []
-        # 我方棋子 (7个通道)
         board_state_list.extend(
             [self.piece_vectors[my_player][pt.value].reshape(BOARD_ROWS, BOARD_COLS) for pt in PieceType])
-        # 敌方棋子 (7个通道)
         board_state_list.extend(
             [self.piece_vectors[opponent_player][pt.value].reshape(BOARD_ROWS, BOARD_COLS) for pt in PieceType])
-        # 暗棋和空位 (2个通道)
         board_state_list.append(self.hidden_vector.reshape(BOARD_ROWS, BOARD_COLS))
         board_state_list.append(self.empty_vector.reshape(BOARD_ROWS, BOARD_COLS))
 
-        # --- 标量状态 (19,) ---
         scalar_state = np.concatenate([
             np.array([
                 self.scores[my_player] / WINNING_SCORE,
@@ -374,8 +327,8 @@ class GameEnvironment(gym.Env):
                 self.move_counter / MAX_CONSECUTIVE_MOVES_FOR_DRAW
             ],
                      dtype=np.float32),
-            _get_piece_survival_vector(self.dead_pieces[my_player]),  # 我方存活棋子 (8,)
-            _get_piece_survival_vector(self.dead_pieces[opponent_player])  # 敌方存活棋子 (8,)
+            _get_piece_survival_vector(self.dead_pieces[my_player]),
+            _get_piece_survival_vector(self.dead_pieces[opponent_player])
         ])
 
         return {"board": np.array(board_state_list, dtype=np.float32), "scalars": scalar_state}
@@ -385,31 +338,22 @@ class GameEnvironment(gym.Env):
         mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
         my_player = player_id if player_id is not None else self.current_player
 
-        # 1. 翻棋动作
         for sq in np.where(self.hidden_vector)[0]:
             mask[self.coords_to_action[SQ_TO_POS[sq]]] = 1
 
-        # --- 移动和吃子动作 ---
-        # 【重要修复】采用 temp_game.py 的逻辑，正确实现棋子等级制度
-        # 3. 计算不同棋子的目标位置 (可移动/可吃)，遵守等级规则
         target_vectors = {}
-        # 从空位开始，逐级加入更小或同级的敌方棋子作为可攻击目标
         cumulative_targets = self.empty_vector.copy()
-        for pt in PieceType: # PieceType的枚举顺序决定了棋子等级
+        for pt in PieceType:
             cumulative_targets |= self.piece_vectors[-my_player][pt.value]
             target_vectors[pt.value] = cumulative_targets.copy()
         
-        # 应用特殊规则: 兵可以吃帅
         target_vectors[PieceType.SOLDIER.value] |= self.piece_vectors[-my_player][PieceType.GENERAL.value]
-        # 应用特殊规则: 帅不能吃兵
         target_vectors[PieceType.GENERAL.value] &= ~self.piece_vectors[-my_player][PieceType.SOLDIER.value]
 
-        # 4. 普通棋子 (非炮) 的移动
         for pt_val in range(NUM_PIECE_TYPES):
             if pt_val == PieceType.CANNON.value:
                 continue
             
-            # 获取该等级棋子的所有可攻击/移动目标
             valid_targets_for_pt = target_vectors[pt_val]
 
             for from_sq in np.where(self.piece_vectors[my_player][pt_val])[0]:
@@ -417,24 +361,19 @@ class GameEnvironment(gym.Env):
                 for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                     if 0 <= r + dr < BOARD_ROWS and 0 <= c + dc < BOARD_COLS:
                         to_sq = POS_TO_SQ[(r + dr, c + dc)]
-                        # 如果目标位置在合法目标集合中
                         if valid_targets_for_pt[to_sq]:
                             idx = self.coords_to_action.get((SQ_TO_POS[from_sq], (r + dr, c + dc)))
                             if idx is not None:
                                 mask[idx] = 1
         
-        # 5. 炮的移动和攻击 (此部分逻辑保持不变)
         all_pieces_vector = ~self.empty_vector
-        # 炮不能吃自己的明棋, 但可以吃自己的暗棋、所有敌方棋子和空位(尽管攻击逻辑需要目标不能是空位)
         valid_cannon_targets = ~self.revealed_vectors[my_player] 
         for from_sq in np.where(self.piece_vectors[my_player][PieceType.CANNON.value])[0]:
-            for d_idx in range(4): # 4个方向
+            for d_idx in range(4):
                 ray = self.attack_tables['rays'][d_idx, from_sq]
                 blockers = np.where(ray & all_pieces_vector)[0]
-                if len(blockers) >= 2: # 必须至少有2个棋子在射线上
-                    # 找到炮架
+                if len(blockers) >= 2:
                     screen = np.max(blockers) if d_idx in [0, 2] else np.min(blockers)
-                    # 找到炮架后的目标
                     targets_on_ray = blockers[blockers < screen] if d_idx in [0, 2] else blockers[blockers > screen]
                     if targets_on_ray.size > 0:
                         target_sq = np.max(targets_on_ray) if d_idx in [0, 2] else np.min(targets_on_ray)
@@ -444,30 +383,22 @@ class GameEnvironment(gym.Env):
                                 mask[idx] = 1
         return mask
 
-    # ==============================================================================
-    # --- 内部初始化辅助函数 ---
-    # ==============================================================================
-
     def _initialize_lookup_tables(self):
         """预计算攻击射线和动作映射表"""
-        # 射线攻击表 (用于炮)
         ray_attacks = np.zeros((4, TOTAL_POSITIONS, TOTAL_POSITIONS), dtype=bool)
         for sq in range(TOTAL_POSITIONS):
             r, c = SQ_TO_POS[sq]
-            for i in range(r - 1, -1, -1): ray_attacks[0, sq, POS_TO_SQ[(i, c)]] = True  # 上
-            for i in range(r + 1, 4):      ray_attacks[1, sq, POS_TO_SQ[(i, c)]] = True  # 下
-            for i in range(c - 1, -1, -1): ray_attacks[2, sq, POS_TO_SQ[(r, i)]] = True  # 左
-            for i in range(c + 1, 4):      ray_attacks[3, sq, POS_TO_SQ[(r, i)]] = True  # 右
+            for i in range(r - 1, -1, -1): ray_attacks[0, sq, POS_TO_SQ[(i, c)]] = True
+            for i in range(r + 1, 4):      ray_attacks[1, sq, POS_TO_SQ[(i, c)]] = True
+            for i in range(c - 1, -1, -1): ray_attacks[2, sq, POS_TO_SQ[(r, i)]] = True
+            for i in range(c + 1, 4):      ray_attacks[3, sq, POS_TO_SQ[(r, i)]] = True
         self.attack_tables['rays'] = ray_attacks
         
-        # 动作索引与坐标的映射
         action_idx = 0
-        # 翻棋
         for sq in range(TOTAL_POSITIONS):
             self.action_to_coords[action_idx] = tuple(SQ_TO_POS[sq])
             self.coords_to_action[tuple(SQ_TO_POS[sq])] = action_idx
             action_idx += 1
-        # 普通移动
         for from_sq in range(TOTAL_POSITIONS):
             r, c = SQ_TO_POS[from_sq]
             from_pos = (r, c)
@@ -477,7 +408,6 @@ class GameEnvironment(gym.Env):
                     self.action_to_coords[action_idx] = (from_pos, tuple(SQ_TO_POS[to_sq]))
                     self.coords_to_action[(from_pos, tuple(SQ_TO_POS[to_sq]))] = action_idx
                     action_idx += 1
-        # 炮的攻击
         for r1 in range(BOARD_ROWS):
             for c1 in range(BOARD_COLS):
                 from_pos = (r1, c1)

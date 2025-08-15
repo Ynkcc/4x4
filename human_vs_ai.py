@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
         ai_layout.addRow("游戏模式:", self.mode_combo)
 
         # AI模型路径
-        self.model_path_edit = QLineEdit("./models/self_play_final/main_opponent.zip")
+        self.model_path_edit = QLineEdit("./models/self_play_final/challenger.zip")
         self.model_path_edit.setPlaceholderText("输入AI模型文件路径")
         ai_layout.addRow("AI模型路径:", self.model_path_edit)
 

@@ -11,6 +11,7 @@ import sys
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from sb3_contrib import MaskablePPO
+from typing import Dict, Any, List
 
 from utils.constants import *
 from game.environment import GameEnvironment
@@ -82,8 +83,8 @@ class SelfPlayTrainer:
         # --- 对手池核心属性 (重构) ---
         self.long_term_pool_paths = []
         self.short_term_pool_paths = []
-        self.opponent_pool_for_env = []
-        self.opponent_pool_weights = []
+        # 【修改】现在只用一个字典来存储所有对手数据
+        self.combined_opponent_data: List[Dict[str, Any]] = []
 
         # --- Elo与模型管理 ---
         self.elo_ratings = {}
@@ -181,47 +182,32 @@ class SelfPlayTrainer:
 
     def _manage_opponent_pool(self, new_opponent_path=None):
         """
-        【核心重构】管理长期和短期对手池。
-        - 添加新对手（如果提供）。
-        - 根据规则对池进行修剪。
+        管理长期和短期对手池。
         """
-        # 如果有新对手加入（即被击败的主宰者），则增加代数并记录
         if new_opponent_path:
             self.latest_generation += 1
             new_opponent_name = os.path.basename(new_opponent_path)
             self.model_generations[new_opponent_name] = self.latest_generation
             self._save_elo_and_generations()
 
-        # 1. 从磁盘加载所有对手，并按代数排序
         all_opponents = []
         for filename in os.listdir(OPPONENT_POOL_DIR):
             if filename.endswith('.zip'):
                 gen = self.model_generations.get(filename, 0)
                 all_opponents.append((filename, gen))
         
-        all_opponents.sort(key=lambda x: x[1], reverse=True) # 按代数降序排，最新的在前
-
-        # 2. 清空现有池
-        self.short_term_pool_paths = []
-        self.long_term_pool_paths = []
-
-        # 3. 填充短期池
+        all_opponents.sort(key=lambda x: x[1], reverse=True)
         self.short_term_pool_paths = [os.path.join(OPPONENT_POOL_DIR, name) for name, gen in all_opponents[:SHORT_TERM_POOL_SIZE]]
-
-        # 4. 填充长期池
-        # 从短期池之后开始考虑
         candidates_for_long_term = all_opponents[SHORT_TERM_POOL_SIZE:]
         
-        # 长期池的保留规则：与最新模型的代数差为2的指数
+        self.long_term_pool_paths = []
         for opp_name, opp_gen in candidates_for_long_term:
             if len(self.long_term_pool_paths) >= LONG_TERM_POOL_SIZE:
                 break
-            
             age = self.latest_generation - opp_gen
-            if age > 0 and (age & (age - 1) == 0): # 检查age是否是2的幂
+            if age > 0 and (age & (age - 1) == 0):
                 self.long_term_pool_paths.append(os.path.join(OPPONENT_POOL_DIR, opp_name))
         
-        # 5. 清理磁盘上不再需要的模型
         current_pool_names = {os.path.basename(p) for p in self.short_term_pool_paths + self.long_term_pool_paths}
         for filename, _ in all_opponents:
             if filename not in current_pool_names:
@@ -231,54 +217,74 @@ class SelfPlayTrainer:
                 self.model_generations.pop(filename, None)
         
         self._save_elo_and_generations()
-        self._update_opponent_weights()
+        self._update_opponent_data()
 
-    def _update_opponent_weights(self):
+    def _update_opponent_data(self):
         """
-        【重构】根据Elo评分计算采样权重，合并长短期池。
+        【修改】现在创建一个包含路径、权重和预加载模型实例的字典列表。
         """
-        # 修复：先创建完整的对手池列表，然后计算权重
+        self.combined_opponent_data.clear()
+        
         final_pool_for_env = self.short_term_pool_paths + self.long_term_pool_paths
         
-        # 确保主宰者有Elo
         main_opponent_name = os.path.basename(MAIN_OPPONENT_PATH)
         if main_opponent_name not in self.elo_ratings:
             self.elo_ratings[main_opponent_name] = self.default_elo
         main_elo = self.elo_ratings[main_opponent_name]
         
         weights = []
-        # 计算池中每个对手的权重
-        for path in final_pool_for_env:
-            opp_name = os.path.basename(path)
-            opp_elo = self.elo_ratings.get(opp_name, self.default_elo)
-            elo_diff = abs(main_elo - opp_elo)
-            weight = np.exp(-elo_diff / ELO_WEIGHT_TEMPERATURE)
-            weights.append(weight)
-        
-        # 将主宰者加入到对手池中
-        final_pool_for_env.append(MAIN_OPPONENT_PATH)
-        # 主宰者也有一定概率成为对手
-        main_opponent_weight = sum(weights) * 0.3 if weights else 1.0
-        all_weights = weights + [main_opponent_weight]
-        
-        # 修复：将完整的对手池和权重列表赋值给实例变量
-        self.opponent_pool_for_env = final_pool_for_env
-        
-        total_weight = sum(all_weights)
-        if total_weight > 0:
-            self.opponent_pool_weights = [w / total_weight for w in all_weights]
-        else:
-            num_opps = len(final_pool_for_env)
-            self.opponent_pool_weights = [1.0 / num_opps] * num_opps if num_opps > 0 else []
+        models_to_load = final_pool_for_env + [MAIN_OPPONENT_PATH]
 
+        # 1. 加载所有模型并计算权重
+        loaded_models = {}
+        for path in set(models_to_load):
+            try:
+                model_instance = MaskablePPO.load(path, device='cpu')
+                loaded_models[path] = model_instance
+                
+                opp_name = os.path.basename(path)
+                opp_elo = self.elo_ratings.get(opp_name, self.default_elo)
+                elo_diff = abs(main_elo - opp_elo)
+                weight = np.exp(-elo_diff / ELO_WEIGHT_TEMPERATURE)
+                weights.append({'path': path, 'weight': weight})
+            except Exception as e:
+                raise ValueError(f"训练器错误: 预加载模型 {path} 失败: {e}。")
+
+        # 2. 将主宰者权重特殊处理
+        main_opponent_weight_factor = sum(w['weight'] for w in weights if w['path'] != MAIN_OPPONENT_PATH) * 0.3 if weights else 1.0
+        
+        for item in weights:
+            if item['path'] == MAIN_OPPONENT_PATH:
+                item['weight'] = main_opponent_weight_factor
+
+        total_weight = sum(item['weight'] for item in weights)
+
+        # 3. 归一化权重并组合数据
+        if total_weight > 0:
+            for item in weights:
+                item['weight'] /= total_weight
+                self.combined_opponent_data.append({
+                    'path': item['path'],
+                    'weight': item['weight'],
+                    'model': loaded_models[item['path']]
+                })
+        else:
+            num_opps = len(models_to_load)
+            for path in models_to_load:
+                self.combined_opponent_data.append({
+                    'path': path,
+                    'weight': 1.0 / num_opps if num_opps > 0 else 0.0,
+                    'model': loaded_models[path]
+                })
+
+        # 打印状态
         print("\n--- 对手池状态 ---")
         print(f"短期池 ({len(self.short_term_pool_paths)}/{SHORT_TERM_POOL_SIZE}): {[os.path.basename(p) for p in self.short_term_pool_paths]}")
         print(f"长期池 ({len(self.long_term_pool_paths)}/{LONG_TERM_POOL_SIZE}): {[os.path.basename(p) for p in self.long_term_pool_paths]}")
         print("\n对手池采样权重已更新:")
-        for path, weight in zip(self.opponent_pool_for_env, self.opponent_pool_weights):
-            elo = self.elo_ratings.get(os.path.basename(path), self.default_elo)
-            print(f"  - {os.path.basename(path)} (Elo: {elo:.0f}, 权重: {weight:.2%})")
-
+        for item in self.combined_opponent_data:
+            elo = self.elo_ratings.get(os.path.basename(item['path']), self.default_elo)
+            print(f"  - {os.path.basename(item['path']):<20} (Elo: {elo:.0f}, 权重: {item['weight']:.2%})")
 
     def _prepare_environment_and_models(self):
         """准备用于训练的模型和环境。"""
@@ -292,14 +298,12 @@ class SelfPlayTrainer:
         self.env = make_vec_env(
             GameEnvironment, n_envs=N_ENVS, vec_env_cls=vec_env_cls,
             env_kwargs={
-                'opponent_pool': self.opponent_pool_for_env,
-                'opponent_weights': self.opponent_pool_weights,
-                # 使用常量中的初始值
+                # 【修改】现在只传递一个参数
+                'opponent_data': self.combined_opponent_data,
                 'shaping_coef': SHAPING_COEF_INITIAL 
             }
         )
         
-        # 【核心修改】训练器永远只加载和训练挑战者模型
         print(f"加载学习者模型: {os.path.basename(CHALLENGER_PATH)}")
         self.model = load_ppo_model_with_hyperparams(
             CHALLENGER_PATH,
@@ -313,7 +317,6 @@ class SelfPlayTrainer:
         print(f"🏋️  阶段一: 挑战者进行 {STEPS_PER_LOOP:,} 步训练...")
         start_time = time.time()
         self.model.learn(total_timesteps=STEPS_PER_LOOP, reset_num_timesteps=False, progress_bar=PPO_SHOW_PROGRESS)
-        # 训练后立即保存，覆盖旧的挑战者模型
         self.model.save(CHALLENGER_PATH)
         elapsed_time = time.time() - start_time
         print(f"✅ 训练完成! 用时: {elapsed_time:.1f}秒, 总步数: {self.model.num_timesteps:,}")
@@ -352,35 +355,30 @@ class SelfPlayTrainer:
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
-            # 1. 确定旧主宰者入池后的新名字
             old_main_gen = self.latest_generation + 1
             new_opponent_name = f"opponent_{old_main_gen}.zip"
             new_opponent_path = os.path.join(OPPONENT_POOL_DIR, new_opponent_name)
             
-            # 2. 将旧主宰者复制到对手池
             shutil.copy(MAIN_OPPONENT_PATH, new_opponent_path)
             self.elo_ratings[new_opponent_name] = self.elo_ratings[main_opponent_name]
             print(f"旧主宰者 {main_opponent_name} 已存入对手池，名为 {new_opponent_name}")
             
-            # 3. 挑战者晋升为新主宰者
             shutil.copy(CHALLENGER_PATH, MAIN_OPPONENT_PATH)
-            # 主宰者的Elo直接继承晋升后的挑战者Elo
             self.elo_ratings[main_opponent_name] = self.elo_ratings[challenger_name]
             print(f"挑战者已成为新主宰者！")
 
-            # 4. 更新对手池结构并重新计算权重
             self._manage_opponent_pool(new_opponent_path=new_opponent_path)
             
-            # 5. 在所有并行环境中更新对手池
             print(f"🔥 发送指令，在所有 {N_ENVS} 个并行环境中更新对手池...")
-            self.env.env_method("reload_opponent_pool", new_pool=self.opponent_pool_for_env, new_weights=self.opponent_pool_weights)
+            # 【修改】现在传递的是一个参数
+            self.env.env_method("reload_opponent_pool", new_opponent_data=self.combined_opponent_data)
             print("✅ 所有环境中的对手池均已成功更新！")
             
             return True
         else:
             print(f"🛡️  挑战失败 (胜率 {win_rate:.2%} <= {EVALUATION_THRESHOLD:.2%})。主宰者保持不变。")
             print("...挑战者将继续训练以发起下一次挑战。")
-            self._save_elo_and_generations() # 仅保存Elo和代数更新
+            self._save_elo_and_generations()
             return False
 
     def run(self):
@@ -390,10 +388,8 @@ class SelfPlayTrainer:
             print("\n--- [步骤 3/5] 开始Elo自我对弈主循环 ---")
             successful_challenges = 0
             
-            # --- 【核心修改】奖励塑形衰减逻辑 ---
             total_decay_loops = min(TOTAL_TRAINING_LOOPS, SHAPING_DECAY_END_LOOP)
             if total_decay_loops > 0:
-                # 计算每个循环需要衰减的量
                 decay_per_loop = (SHAPING_COEF_INITIAL - SHAPING_COEF_FINAL) / total_decay_loops
             else:
                 decay_per_loop = 0
@@ -401,21 +397,15 @@ class SelfPlayTrainer:
             for i in range(1, TOTAL_TRAINING_LOOPS + 1):
                 print(f"\n{'='*70}\n🔄 训练循环 {i}/{TOTAL_TRAINING_LOOPS} | 成功挑战次数: {successful_challenges}\n{'='*70}")
                 try:
-                    # --- 在每个循环开始时更新塑形系数 ---
-                    if SHAPING_COEF_INITIAL > SHAPING_COEF_FINAL: # 仅当需要衰减时才执行
+                    if SHAPING_COEF_INITIAL > SHAPING_COEF_FINAL:
                         if i <= total_decay_loops:
-                            # 线性衰减
                             current_coef = SHAPING_COEF_INITIAL - (i * decay_per_loop)
                         else:
-                            # 衰减结束后，保持最终值
                             current_coef = SHAPING_COEF_FINAL
                         
-                        # 使用 set_attr 更新所有并行环境的属性
                         self.env.set_attr("shaping_coef", current_coef)
                         
-                        # 定期打印当前系数以供监控
                         if PPO_VERBOSE > 0 and (i < total_decay_loops + 1):
-                            # get_attr 会返回一个列表，每个环境一个值，我们只取第一个来显示
                             actual_coef = self.env.get_attr("shaping_coef")[0]
                             print(f"      [INFO] 奖励塑形系数 (shaping_coef) 已更新为: {actual_coef:.4f}")
 
