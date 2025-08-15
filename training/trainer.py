@@ -237,7 +237,8 @@ class SelfPlayTrainer:
         """
         【重构】根据Elo评分计算采样权重，合并长短期池。
         """
-        self.opponent_pool_for_env = self.short_term_pool_paths + self.long_term_pool_paths
+        # 修复：先创建完整的对手池列表，然后计算权重
+        final_pool_for_env = self.short_term_pool_paths + self.long_term_pool_paths
         
         # 确保主宰者有Elo
         main_opponent_name = os.path.basename(MAIN_OPPONENT_PATH)
@@ -247,19 +248,22 @@ class SelfPlayTrainer:
         
         weights = []
         # 计算池中每个对手的权重
-        for path in self.opponent_pool_for_env:
+        for path in final_pool_for_env:
             opp_name = os.path.basename(path)
             opp_elo = self.elo_ratings.get(opp_name, self.default_elo)
             elo_diff = abs(main_elo - opp_elo)
             weight = np.exp(-elo_diff / ELO_WEIGHT_TEMPERATURE)
             weights.append(weight)
         
+        # 将主宰者加入到对手池中
+        final_pool_for_env.append(MAIN_OPPONENT_PATH)
         # 主宰者也有一定概率成为对手
         main_opponent_weight = sum(weights) * 0.3 if weights else 1.0
-
-        final_pool_for_env = self.opponent_pool_for_env + [MAIN_OPPONENT_PATH]
         all_weights = weights + [main_opponent_weight]
-
+        
+        # 修复：将完整的对手池和权重列表赋值给实例变量
+        self.opponent_pool_for_env = final_pool_for_env
+        
         total_weight = sum(all_weights)
         if total_weight > 0:
             self.opponent_pool_weights = [w / total_weight for w in all_weights]
@@ -271,9 +275,10 @@ class SelfPlayTrainer:
         print(f"短期池 ({len(self.short_term_pool_paths)}/{SHORT_TERM_POOL_SIZE}): {[os.path.basename(p) for p in self.short_term_pool_paths]}")
         print(f"长期池 ({len(self.long_term_pool_paths)}/{LONG_TERM_POOL_SIZE}): {[os.path.basename(p) for p in self.long_term_pool_paths]}")
         print("\n对手池采样权重已更新:")
-        for path, weight in zip(final_pool_for_env, self.opponent_pool_weights):
+        for path, weight in zip(self.opponent_pool_for_env, self.opponent_pool_weights):
             elo = self.elo_ratings.get(os.path.basename(path), self.default_elo)
             print(f"  - {os.path.basename(path)} (Elo: {elo:.0f}, 权重: {weight:.2%})")
+
 
     def _prepare_environment_and_models(self):
         """准备用于训练的模型和环境。"""

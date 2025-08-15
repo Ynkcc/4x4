@@ -255,7 +255,7 @@ class GameEnvironment(gym.Env):
             # 翻棋动作
             self._apply_reveal_update(POS_TO_SQ[self.action_to_coords[action_index]])
             self.move_counter = 0
-            reward = 0.01  # 翻棋给予微小正奖励
+            reward = 0
         else:
             # 移动或吃子动作
             from_sq, to_sq = POS_TO_SQ[self.action_to_coords[action_index][0]], POS_TO_SQ[
@@ -295,7 +295,7 @@ class GameEnvironment(gym.Env):
             self.revealed_vectors[attacker.player][to_sq] = True
             self.empty_vector[from_sq], self.empty_vector[to_sq] = True, False
             self.move_counter += 1
-            return -0.001  # 移动给予微小负奖励以鼓励吃子
+            return 0.0  # 移动没有奖励
         else:  # 吃子
             points = PIECE_VALUES[defender.piece_type]
             self.scores[attacker.player] += points

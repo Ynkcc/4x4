@@ -43,7 +43,7 @@ PPO_CLIP_RANGE = 0.2
 # 每次更新收集的步数 (默认: 2048)
 PPO_N_STEPS = 2048
 # 批次大小 (默认: 64)
-PPO_BATCH_SIZE = 64
+PPO_BATCH_SIZE = 512
 # 训练轮数 (默认: 10)
 PPO_N_EPOCHS = 10
 # GAE lambda参数 (默认: 0.95)
@@ -91,13 +91,12 @@ TOTAL_TRAINING_LOOPS = 1000
 # 并行环境数量
 N_ENVS = 8
 # 在每次评估之间，学习者训练多少步
-STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 2
-
+STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 
 # --- 评估超参数 ---
 # 评估时进行多少局游戏 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 100
 # 挑战者胜率需要超过多少才能取代主宰者
-EVALUATION_THRESHOLD = 0.53 
+EVALUATION_THRESHOLD = 0.7 
 # 评估时使用的并行环境数量 (评估时通常用1个)
 EVALUATION_N_ENVS = 1
