@@ -39,11 +39,11 @@ SHAPING_DECAY_END_LOOP = 50
 # 学习率 (默认: 3e-4)
 INITIAL_LR = 1e-4
 # PPO 裁剪范围 (默认: 0.2)
-PPO_CLIP_RANGE = 0.1
+PPO_CLIP_RANGE = 0.3
 # 每次更新收集的步数 (默认: 2048)
 PPO_N_STEPS = 2048
 # 批次大小 (默认: 64)
-PPO_BATCH_SIZE = 512
+PPO_BATCH_SIZE = 1024
 # 训练轮数 (默认: 10)
 PPO_N_EPOCHS = 10
 # GAE lambda参数 (默认: 0.95)
@@ -64,11 +64,11 @@ PPO_SHOW_PROGRESS = True
 
 # --- 神经网络架构超参数 ---
 # 特征提取器输出维度 (默认: 256)
-NETWORK_FEATURES_DIM = 256
+NETWORK_FEATURES_DIM = 512
 # 残差块数量 (默认: 4)
 NETWORK_NUM_RES_BLOCKS = 4
 # 隐藏层通道数 (默认: 64)
-NETWORK_NUM_HIDDEN_CHANNELS = 64
+NETWORK_NUM_HIDDEN_CHANNELS = 256
 
 
 # --- 对手池与Elo系统超参数 ---
