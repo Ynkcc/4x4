@@ -6,9 +6,13 @@ from torch.nn import functional as F
 from typing import Dict, Tuple
 import random
 
-# 导入自定义常量
-from constants import (NETWORK_NUM_HIDDEN_CHANNELS, NETWORK_NUM_RES_BLOCKS, 
-                        LSTM_HIDDEN_SIZE, ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE, EXP_EPSILON)
+# 网络相关常量
+NETWORK_NUM_HIDDEN_CHANNELS = 64
+NETWORK_NUM_RES_BLOCKS = 5
+LSTM_HIDDEN_SIZE = 128
+ACTION_SPACE_SIZE = 112  # 16个翻棋动作 + 48个移动动作 + 48个炮攻击动作
+HISTORY_WINDOW_SIZE = 15
+EXP_EPSILON = 0.01
 
 class ResidualBlock(nn.Module):
     """

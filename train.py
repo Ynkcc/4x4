@@ -2,131 +2,151 @@
 import os
 import time
 import numpy as np
+import pickle
+import random
+from collections import deque
 
 import torch
 from torch import nn
-from constants import *
+import torch.nn.functional as F
+
+# 游戏相关常量
+WINNING_SCORE = 60
+MAX_CONSECUTIVE_MOVES_FOR_DRAW = 12
+MAX_STEPS_PER_EPISODE = 100
+ACTION_SPACE_SIZE = 112
+HISTORY_WINDOW_SIZE = 15
+
+# 网络相关常量
+NETWORK_NUM_HIDDEN_CHANNELS = 64
+NETWORK_NUM_RES_BLOCKS = 5
+LSTM_HIDDEN_SIZE = 128
+EXP_EPSILON = 0.01
+
+# 训练相关常量
+TRAINING_DEVICE = 'cpu'
+SAVEDIR = 'saved_models'
+LEARNING_RATE = 0.0001
+MOMENTUM = 0
+EPSILON = 1e-5
+ALPHA = 0.99
+MAX_GRAD_NORM = 40.0
 from environment import GameEnvironment
 from net_model import Model
 
-def compute_loss(values, targets):
-    """计算均方误差损失"""
-    return ((values.squeeze(-1) - targets)**2).mean()
+# DMC 模式的配置
+CONFIG = {
+    'batch_size': 512,         # 训练的batch大小
+    'epochs': 1,               # 每次更新的train_step数量 (DMC通常为1)
+    'buffer_size': 10000,      # 经验池大小
+    'game_batch_num': 1500,    # 训练更新的总次数
+    'train_update_interval': 10 # 每次更新的间隔时间(秒)
+}
 
-def check_batch_consistency(batch):
-    """
-    检查批次数据的形状和类型，确保输入正确。
-    """
-    if not isinstance(batch, dict) or 'board' not in batch or 'scalars' not in batch or 'target' not in batch:
-        raise ValueError("批次数据格式不正确，应为包含 'board', 'scalars', 'target' 的字典。")
-    if not all(isinstance(v, torch.Tensor) for v in batch.values()):
-        raise ValueError("批次数据中的值必须是torch.Tensor。")
-
-def learn(learner_model, optimizer, batch):
-    """执行一步学习（优化）"""
-    device = learner_model.device
-    
-    check_batch_consistency(batch)
-    
-    board_obs = batch['board'].to(device)
-    scalars_obs = batch['scalars'].to(device)
-    target = batch['target'].to(device)
-    
-    learner_model.network.train()
-    
-    # 网络的输入是状态特征和动作特征的组合，在这里表现为board和包含动作编码的scalars
-    values = learner_model.network({'board': board_obs, 'scalars': scalars_obs}).squeeze(-1)
-    loss = compute_loss(values, target)
-    
-    optimizer.zero_grad()
-    loss.backward()
-    nn.utils.clip_grad_norm_(learner_model.network.parameters(), MAX_GRAD_NORM)
-    optimizer.step()
-
-    learner_model.network.eval()
-    
-    return loss.item()
-
-def train():
-    """主训练函数"""
-    # 检查硬件配置是否合理
-    if not ACTOR_DEVICE_CPU and TRAINING_DEVICE == 'cpu':
-        raise ValueError("当训练设备为CPU时，Actor设备也必须为CPU。请检查配置。")
+class TrainPipeline:
+    def __init__(self, init_model_path=None):
+        # 训练参数
+        self.batch_size = CONFIG['batch_size']
+        self.epochs = CONFIG['epochs']
+        self.game_batch_num = CONFIG['game_batch_num']
         
-    if not ACTOR_DEVICE_CPU and not torch.cuda.is_available():
-        raise ValueError("CUDA不可用。请使用 `ACTOR_DEVICE_CPU=True` 和 `TRAINING_DEVICE='cpu'` 参数进行CPU训练。")
+        # 数据缓冲区
+        self.buffer_size = CONFIG['buffer_size']
+        self.data_buffer = deque(maxlen=self.buffer_size)
 
-    print("启动训练...")
-    
-    # 准备模型和优化器
-    device = torch.device(f'cuda:{TRAINING_DEVICE}' if TRAINING_DEVICE != 'cpu' else 'cpu')
-    env = GameEnvironment()
+        # 环境与模型
+        self.device = torch.device(f'cuda:{TRAINING_DEVICE}' if TRAINING_DEVICE != 'cpu' else 'cpu')
+        self.env = GameEnvironment()
+        self.learner_model = Model(self.env.observation_space, self.device)
+        
+        # 加载已有模型
+        if init_model_path and os.path.exists(init_model_path):
+            print(f"检测到已存在模型，从 {init_model_path} 加载。")
+            try:
+                self.learner_model.network.load_state_dict(torch.load(init_model_path, map_location=self.device))
+            except Exception as e:
+                print(f"加载模型失败: {e}。将使用新模型。")
+        else:
+            print("未找到模型，创建新模型。")
+            os.makedirs(SAVEDIR, exist_ok=True)
 
-    # 模型加载或创建逻辑
-    model_path = os.path.join(SAVEDIR, 'model.pt')
-    if os.path.exists(model_path):
-        print(f"检测到已存在模型，从 {model_path} 加载。")
+        # 使用与原 learner.py 相同的 RMSprop 优化器
+        self.optimizer = torch.optim.RMSprop(
+            self.learner_model.network.parameters(),
+            lr=LEARNING_RATE,
+            momentum=MOMENTUM,
+            eps=EPSILON,
+            alpha=ALPHA
+        )
+
+    def update_network(self):
+        """核心训练步骤：使用DMC数据更新价值网络"""
+        mini_batch = random.sample(self.data_buffer, self.batch_size)
+        
+        # 解包 DMC 数据: (board, scalars_with_action, target_value)
+        board_batch = torch.FloatTensor(np.array([data[0] for data in mini_batch])).to(self.device)
+        scalars_batch = torch.FloatTensor(np.array([data[1] for data in mini_batch])).to(self.device)
+        target_batch = torch.FloatTensor(np.array([data[2] for data in mini_batch])).to(self.device)
+        
+        # 开始训练
+        for i in range(self.epochs):
+            self.learner_model.network.train()
+            
+            # 网络的输入是状态特征和one-hot编码的动作特征
+            # 假设网络输出的是单一的价值预测值
+            values = self.learner_model.network(board_batch, scalars_batch)
+            values = values.squeeze(-1)
+
+            # --- 计算损失函数 (仅价值损失 MSE) ---
+            loss = F.mse_loss(values, target_batch)
+            
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.learner_model.network.parameters(), MAX_GRAD_NORM)
+            self.optimizer.step()
+        
+        print(f"Loss: {loss.item():.4f}")
+
+    def run(self):
+        """启动主训练循环"""
+        model_path = os.path.join(SAVEDIR, 'model.pt')
+        buffer_path = os.path.join(SAVEDIR, 'train_data_buffer.pkl')
+
         try:
-            # 检查模型文件中保存的是完整模型还是state_dict
-            loaded_data = torch.load(model_path, map_location=device, weights_only=False)
-            
-            if isinstance(loaded_data, dict):
-                # 如果是state_dict，正常加载
-                learner_model = Model(env.observation_space, device)
-                learner_model.network.load_state_dict(loaded_data)
-            else:
-                # 如果保存的是完整模型，直接使用加载的网络
-                learner_model = Model(env.observation_space, device)
-                learner_model.network = loaded_data.to(device)
-        except Exception as e:
-            raise ValueError(f"加载模型失败: {e}")
-    else:
-        print("未找到模型，创建新模型。")
-        os.makedirs(SAVEDIR, exist_ok=True)
-        learner_model = Model(env.observation_space, device)
-    
-    optimizer = torch.optim.RMSprop(
-        learner_model.network.parameters(),
-        lr=LEARNING_RATE,
-        momentum=MOMENTUM,
-        eps=EPSILON,
-        alpha=ALPHA
-    )
-    
-    # 警告: 由于移除了 Redis 相关代码，此训练循环无法获取实际数据。
-    # 此处仅为演示训练流程，需自行实现数据加载逻辑。
-    print("警告: 训练数据获取逻辑已移除。当前无法进行完整训练。")
-    print("训练流程将在无法获取数据时停止。")
+            for i in range(self.game_batch_num):
+                # --- 从文件加载数据 ---
+                if os.path.exists(buffer_path):
+                    try:
+                        with open(buffer_path, 'rb') as f:
+                            data_file = pickle.load(f)
+                            self.data_buffer = data_file['data_buffer']
+                        print(f"批次 {i+1}/{self.game_batch_num}: 成功载入 {len(self.data_buffer)} 条数据。")
+                    except Exception as e:
+                        print(f"载入数据失败: {e}, 等待下一轮...")
+                        time.sleep(CONFIG['train_update_interval'])
+                        continue
+                else:
+                    print("未找到数据文件，等待Actor生成数据...")
+                    time.sleep(CONFIG['train_update_interval'])
+                    continue
 
-    total_frames = 0
-    last_log_time = time.time()
-    
-    # 模拟训练主循环
-    try:
-        while total_frames < TOTAL_FRAMES:
-            # 假设这里有一个 `get_batch()` 函数能够从缓冲区中获取数据
-            # 该批次数据应包含 board、带有动作编码的 scalars 和蒙特卡洛目标值
-            batch = None # 模拟无法获取数据
-            if batch is None:
-                time.sleep(1)
-                continue
-            
-            # 执行一步学习
-            loss = learn(learner_model, optimizer, batch)
-            
-            total_frames += BATCH_SIZE * UNROLL_LENGTH
-            
-            # 简化版日志输出
-            if time.time() - last_log_time > LOG_INTERVAL_SEC:
-                print(f"Frames: {total_frames}, Loss: {loss:.4f}")
-                last_log_time = time.time()
-        
-    except KeyboardInterrupt:
-        print("训练中断")
-    finally:
-        # 训练结束后保存模型
-        print(f"训练结束，保存模型到 {model_path}")
-        torch.save(learner_model.network.state_dict(), model_path)
-        
+                # --- 执行训练 ---
+                if len(self.data_buffer) > self.batch_size:
+                    self.update_network()
+                    # 保存最新模型
+                    torch.save(self.learner_model.network.state_dict(), model_path)
+                else:
+                    print(f"数据不足 ({len(self.data_buffer)}/{self.batch_size})，跳过本轮训练。")
+
+                time.sleep(CONFIG['train_update_interval'])
+
+        except KeyboardInterrupt:
+            print("\n\r训练中断。")
+        finally:
+            print(f"训练结束，保存最终模型到 {model_path}")
+            torch.save(self.learner_model.network.state_dict(), model_path)
+
 if __name__ == '__main__':
-    train()
+    model_file_path = os.path.join(SAVEDIR, 'model.pt')
+    training_pipeline = TrainPipeline(init_model_path=model_file_path)
+    training_pipeline.run()

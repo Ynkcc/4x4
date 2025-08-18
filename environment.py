@@ -6,13 +6,15 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional
 
-# 从新文件导入常量
-from constants import (WINNING_SCORE, MAX_CONSECUTIVE_MOVES_FOR_DRAW, MAX_STEPS_PER_EPISODE,
-                        ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE)
-
-
 # ==============================================================================
 # --- 游戏常量定义 ---
+
+# 游戏相关常量
+WINNING_SCORE = 60
+MAX_CONSECUTIVE_MOVES_FOR_DRAW = 12
+MAX_STEPS_PER_EPISODE = 100
+ACTION_SPACE_SIZE = 112  # 16个翻棋动作 + 48个移动动作 + 48个炮攻击动作
+HISTORY_WINDOW_SIZE = 15
 # ==============================================================================
 class PieceType(Enum):
     SOLDIER = 0
@@ -189,9 +191,12 @@ class GameEnvironment(gym.Env):
             self.move_counter += 1
         else:  # 吃子
             points = PIECE_VALUES[defender.piece_type]
-            self.scores[attacker.player] += points
+            if defender.player == attacker.player:
+                opponent = -attacker.player
+                self.scores[opponent] += points  # 吃自己棋子，对方得分
+            else:
+                self.scores[attacker.player] += points
             self.board[to_sq], self.board[from_sq] = attacker, None
-
             # 更新被吃棋子的 bit vectors
             if defender.revealed:
                 self.piece_vectors[defender.player][defender.piece_type.value][to_sq] = False

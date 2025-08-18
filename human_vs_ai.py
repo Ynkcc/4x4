@@ -14,13 +14,13 @@ import numpy as np
 import torch as th
 
 # 【修复】导入游戏环境的路径
-from .environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
+from environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
                               ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
                               MAX_CONSECUTIVE_MOVES_FOR_DRAW)
 
 # 导入新的AI模型
 try:
-    from .net_model import Model, CustomNetwork
+    from net_model import Model, CustomNetwork
     AI_AVAILABLE = True
     print("AI模型支持已加载")
 except ImportError:
