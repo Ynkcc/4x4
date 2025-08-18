@@ -67,16 +67,31 @@ class CustomNetwork(BaseFeaturesExtractor):
             self.cnn_flat_size = cnn_output.shape[1:].numel()
 
         # --- 全连接 (FC) 分支定义 ---
+        # <--- 变更点3：增加FC分支的深度和宽度
         self.fc = nn.Sequential(
-            nn.Linear(scalars_space.shape[0], 64),
+            nn.Linear(scalars_space.shape[0], 128),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
             nn.ReLU()
         )
         fc_output_size = 64
-
+        
         # --- 计算融合后的总特征维度 ---
         self._features_dim = self.cnn_flat_size + fc_output_size
+        
+        # <--- 变更点4：在融合之后添加额外的隐藏层
+        self.post_fusion_head = nn.Sequential(
+            nn.Linear(self._features_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, features_dim),
+            nn.ReLU()
+        )
+        self._features_dim = features_dim
+
 
     def forward(self, observations: Dict[str, th.Tensor]) -> th.Tensor:
         # 从字典中分离出两部分输入
@@ -94,7 +109,10 @@ class CustomNetwork(BaseFeaturesExtractor):
         # 3. 融合两个分支的特征
         combined_features = th.cat([cnn_features_flat, fc_features], dim=1)
         
-        return combined_features
+        # 4. <--- 变更点5：将融合后的特征输入到新的隐藏层中
+        final_features = self.post_fusion_head(combined_features)
+        
+        return final_features
 
 class CustomActorCriticPolicy(MaskableActorCriticPolicy):
     """

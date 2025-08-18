@@ -39,7 +39,7 @@ SHAPING_DECAY_END_LOOP = 50
 # 学习率 (默认: 3e-4)
 INITIAL_LR = 1e-4
 # PPO 裁剪范围 (默认: 0.2)
-PPO_CLIP_RANGE = 0.1
+PPO_CLIP_RANGE = 0.3
 # 每次更新收集的步数 (默认: 2048)
 PPO_N_STEPS = 2048
 # 批次大小 (默认: 64)
@@ -51,7 +51,7 @@ PPO_GAE_LAMBDA = 0.95
 # 价值函数损失系数 (默认: 0.5)
 PPO_VF_COEF = 0.5
 # 熵损失系数 (默认: 0.01)
-PPO_ENT_COEF = 0.01
+PPO_ENT_COEF = 0.05
 # 最大梯度范数 (默认: 0.5)
 PPO_MAX_GRAD_NORM = 0.5
 # 设备选择 ('auto', 'cpu', 'cuda')
