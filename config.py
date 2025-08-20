@@ -47,7 +47,7 @@ class TrainingConfig:
     # 模型保存路径
     SAVEDIR = 'saved_models'
     MODEL_PATH = 'saved_models/model.pt'
-    TRAIN_DATA_BUFFER_PATH = 'train_data_buffer.pkl'  # 训练数据缓存路径
+    TRAIN_DATA_DIR = 'train_data'  # 训练数据缓存路径
     
     # 优化器参数
     LEARNING_RATE = 0.0001
@@ -67,6 +67,11 @@ class TrainingConfig:
 # 数据收集相关配置
 # ============================================================================
 class CollectConfig:
+    # 并发与批处理
+    NUM_THREADS = 4  # 并发收集进程数
+    MAIN_PROCESS_BATCH_SIZE = 4096 # 主进程一次处理的游戏数据量
+    QUEUE_MAX_SIZE = 2*MAIN_PROCESS_BATCH_SIZE # 进程间通信队列的最大容量
+
     # 探索参数
     EPSILON = 0.1  # Epsilon for epsilon-greedy exploration
     
@@ -75,7 +80,7 @@ class CollectConfig:
     
     # 文件路径
     PYTORCH_MODEL_PATH = 'saved_models/model.pt'  # 模型路径
-    TRAIN_DATA_BUFFER_PATH = 'train_data_buffer.pkl'  # 训练数据缓存路径
+    TRAIN_DATA_DIR = 'train_data'  # 训练数据缓存路径
 
 # ============================================================================
 # 人机对战相关配置
@@ -115,4 +120,6 @@ SAVEDIR = TrainingConfig.SAVEDIR
 # 数据收集相关
 COLLECT_EPSILON = CollectConfig.EPSILON
 PYTORCH_MODEL_PATH = CollectConfig.PYTORCH_MODEL_PATH
-TRAIN_DATA_BUFFER_PATH = CollectConfig.TRAIN_DATA_BUFFER_PATH
+TRAIN_DATA_DIR = CollectConfig.TRAIN_DATA_DIR
+NUM_COLLECT_THREADS = CollectConfig.NUM_THREADS
+MAIN_PROCESS_BATCH_SIZE = CollectConfig.MAIN_PROCESS_BATCH_SIZE

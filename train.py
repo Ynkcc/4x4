@@ -116,7 +116,7 @@ class TrainPipeline:
     def run(self):
         """启动主训练循环"""
         model_path = os.path.join(TRAINING_CONFIG.SAVEDIR, 'model.pt')
-        buffer_path = TRAINING_CONFIG.TRAIN_DATA_BUFFER_PATH  # 使用配置中的路径
+        buffer_path = TRAINING_CONFIG.TRAIN_DATA_DIR  # 使用配置中的路径
 
         try:
             for i in range(self.game_batch_num):

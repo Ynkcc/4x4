@@ -35,3 +35,4 @@ tensorboard_logs
 models
 saved_models
 train_data_buffer.pkl
+train_data
