@@ -57,20 +57,34 @@ class TrainingConfig:
     MAX_GRAD_NORM = 40.0
     
     # DMC 训练参数
-    BATCH_SIZE = 512
-    EPOCHS = 1  # 每次更新的train_step数量 (DMC通常为1)
-    BUFFER_SIZE = 10000  # 经验池大小
+    # 【优化】显著增大 BATCH_SIZE，这是提高GPU利用率最关键的参数之一
+    BATCH_SIZE = 4096  
+    # 【优化】增加每次更新的 EPOCHS，让GPU对同一批数据进行更多次训练
+    EPOCHS = 8  
+    # 【优化】极大增加经验池大小，确保有足够多样性的数据可供采样
+    BUFFER_SIZE = 200000 
     GAME_BATCH_NUM = 1500  # 训练更新的总次数
     TRAIN_UPDATE_INTERVAL = 10  # 每次更新的间隔时间(秒)
+    
+    # 经验池采样参数
+    # 【优化】相应地增加开始训练的最小经验池大小
+    MIN_BUFFER_SIZE = 20000  
+    # 保持不变或适当增加，确保训练之间有足够的新数据
+    TRAINING_FREQUENCY = 1000  
+    # 【优化】显著增加每次训练的采样批次数，这是增加单次训练负载最有效的方法
+    SAMPLES_PER_UPDATE = 32 
 
 # ============================================================================
 # 数据收集相关配置
 # ============================================================================
 class CollectConfig:
     # 并发与批处理
-    NUM_THREADS = 4  # 并发收集进程数
-    MAIN_PROCESS_BATCH_SIZE = 4096 # 主进程一次处理的游戏数据量
-    QUEUE_MAX_SIZE = 2*MAIN_PROCESS_BATCH_SIZE # 进程间通信队列的最大容量
+    # 【优化】增加并发收集进程数，如果你的CPU核心数足够多（例如8核或以上），可以设为8或更高
+    NUM_THREADS = 4 
+    MAIN_PROCESS_BATCH_SIZE = 8192 
+    QUEUE_MAX_SIZE = 3 * MAIN_PROCESS_BATCH_SIZE 
+    # 【优化】增大每个进程的本地缓冲区，减少向主队列put的频率，降低进程间通信开销
+    LOCAL_BUFFER_SIZE = 4096  
 
     # 探索参数
     EPSILON = 0.1  # Epsilon for epsilon-greedy exploration

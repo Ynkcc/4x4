@@ -23,18 +23,22 @@ def main():
     
     device = get_device()
     print(f"主进程启动，使用设备: {device}")
+    
+    # 共享模型必须在CPU上以支持多进程间的参数共享
+    shared_model_device = torch.device("cpu")
+    print(f"共享模型使用设备: {shared_model_device} (CPU，用于多进程共享)")
 
     # --- 1. 初始化共享资源 ---
     # 模拟一个环境以获取观察空间
     env = GameEnvironment()
     
-    # 创建一个将在所有进程中共享的模型
-    shared_model = Model(env.observation_space, device)
+    # 创建一个将在所有进程中共享的模型 - 必须在CPU上
+    shared_model = Model(env.observation_space, shared_model_device)
     # 尝试从磁盘加载最新模型
     model_path = TRAINING_CONFIG.MODEL_PATH
     if os.path.exists(model_path):
         try:
-            shared_model.network.load_state_dict(torch.load(model_path, map_location=device))
+            shared_model.network.load_state_dict(torch.load(model_path, map_location=shared_model_device))
             print(f"成功从 {model_path} 加载初始模型。")
         except Exception as e:
             print(f"加载初始模型权重失败: {e}。将使用随机初始化的模型。")

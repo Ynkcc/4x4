@@ -28,17 +28,20 @@ class Worker(mp.Process):
         self.data_queue = data_queue
         self.stop_event = stop_event
         
-        # 每个工作进程拥有自己的环境和模型实例
-        # 模型实例的权重会指向共享内存
+        # 每个工作进程拥有自己的环境
         self.env = GameEnvironment()
-        self.device = get_device()
+        
+        # 收集器必须使用CPU设备以便使用共享模型参数
+        self.device = torch.device("cpu")
+        
+        # 直接使用共享模型（在CPU上）
         self.policy_value_net = shared_model
         
-        print(f"工作进程 #{self.worker_id} 已启动，使用设备: {self.device}")
+        print(f"工作进程 #{self.worker_id} 已启动，使用设备: {self.device} (强制CPU以使用共享模型参数)")
 
     def predict_action(self, obs, legal_actions):
         """使用 Epsilon-Greedy 策略预测动作"""
-        # 确保模型在评估模式
+        # 确保共享模型在评估模式
         self.policy_value_net.network.eval()
         return self.policy_value_net.predict(obs, legal_actions)
 
@@ -89,13 +92,19 @@ class Worker(mp.Process):
                     local_buffer.append((step['board'], step['scalars'], target_value))
                 
                 # --- 3. 当本地缓冲区达到一定大小时，发送到主队列 ---
-                # 这个大小可以根据需要调整，以平衡通信开销和数据新鲜度
-                if len(local_buffer) >= COLLECT_CONFIG.MAIN_PROCESS_BATCH_SIZE / COLLECT_CONFIG.NUM_THREADS:
+                if len(local_buffer) >= COLLECT_CONFIG.LOCAL_BUFFER_SIZE:
                     try:
                         self.data_queue.put(local_buffer)
                         local_buffer = [] # 清空本地缓冲区
                     except Exception as e:
                         print(f"进程 #{self.worker_id} 发送数据失败: {e}")
+            
+            # 处理剩余的本地缓冲区数据
+            if local_buffer:
+                try:
+                    self.data_queue.put(local_buffer)
+                except Exception as e:
+                    print(f"进程 #{self.worker_id} 发送最后的数据失败: {e}")
 
         except KeyboardInterrupt:
             # 当接收到Ctrl+C时，子进程安静地退出
