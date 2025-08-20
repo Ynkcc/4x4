@@ -5,6 +5,7 @@ import numpy as np
 import pickle
 import random
 from collections import deque
+from queue import Empty
 
 import torch
 from torch import nn
@@ -26,37 +27,30 @@ CONFIG = {
     'batch_size': TRAINING_CONFIG.BATCH_SIZE,         # 训练的batch大小
     'epochs': TRAINING_CONFIG.EPOCHS,               # 每次更新的train_step数量 (DMC通常为1)
     'buffer_size': TRAINING_CONFIG.BUFFER_SIZE,      # 经验池大小
-    'game_batch_num': TRAINING_CONFIG.GAME_BATCH_NUM,    # 训练更新的总次数
-    'train_update_interval': TRAINING_CONFIG.TRAIN_UPDATE_INTERVAL # 每次更新的间隔时间(秒)
+    'save_interval': 300 # 每隔多少秒保存一次模型
 }
 
 class TrainPipeline:
-    def __init__(self, init_model_path=None):
+    def __init__(self, shared_model, data_queue, stop_event):
         # 训练参数
         self.batch_size = CONFIG['batch_size']
         self.epochs = CONFIG['epochs']
-        self.game_batch_num = CONFIG['game_batch_num']
         
         # 数据缓冲区
         self.buffer_size = CONFIG['buffer_size']
         self.data_buffer = deque(maxlen=self.buffer_size)
+        
+        # 共享资源
+        self.learner_model = shared_model
+        self.data_queue = data_queue
+        self.stop_event = stop_event
 
-        # 环境与模型
+        # 环境与设备
         self.device = get_device()
         print(f"训练设备: {self.device}")
-        self.env = GameEnvironment()
-        self.learner_model = Model(self.env.observation_space, self.device)
         
-        # 加载已有模型
-        if init_model_path and os.path.exists(init_model_path):
-            print(f"检测到已存在模型，从 {init_model_path} 加载。")
-            try:
-                self.learner_model.network.load_state_dict(torch.load(init_model_path, map_location=self.device))
-            except Exception as e:
-                print(f"加载模型失败: {e}。将使用新模型。")
-        else:
-            print("未找到模型，创建新模型。")
-            os.makedirs(TRAINING_CONFIG.SAVEDIR, exist_ok=True)
+        # 确保模型在正确的设备上
+        self.learner_model.to(self.device)
 
         # 使用与原 learner.py 相同的 RMSprop 优化器
         self.optimizer = torch.optim.RMSprop(
@@ -66,17 +60,20 @@ class TrainPipeline:
             eps=TRAINING_CONFIG.EPSILON,
             alpha=TRAINING_CONFIG.ALPHA
         )
+        
+        # 确保目录存在
+        os.makedirs(TRAINING_CONFIG.SAVEDIR, exist_ok=True)
+        print("训练器初始化完成。")
 
     def update_network(self):
-        """核心训练步骤：使用DMC数据更新价值网络"""
+        """核心训练步骤：使用经验池数据更新价值网络"""
         if len(self.data_buffer) < self.batch_size:
-            print(f"数据不足 ({len(self.data_buffer)}/{self.batch_size})，跳过本轮训练。")
+            # 数据不足，不进行训练
             return
 
         mini_batch = random.sample(self.data_buffer, self.batch_size)
         
-        # 解包 DMC 数据: (board, scalars_with_action, target_value)
-        # 此时 board 和 scalars 还是 numpy 数组
+        # 解包数据: (board, scalars, target_value)
         board_batch_np = np.array([data[0] for data in mini_batch])
         scalars_batch_np = np.array([data[1] for data in mini_batch])
         target_batch_np = np.array([data[2] for data in mini_batch])
@@ -88,10 +85,9 @@ class TrainPipeline:
         
         # 开始训练
         for i in range(self.epochs):
-            self.learner_model.network.train()
+            self.learner_model.network.train() # 切换到训练模式
             
-            # --- 【核心修复】 ---
-            # 将 board 和 scalars 数据打包成一个字典，以匹配模型的 forward 方法签名
+            # 将 board 和 scalars 数据打包成一个字典
             observations_batch = {
                 'board': board_batch,
                 'scalars': scalars_batch
@@ -101,68 +97,63 @@ class TrainPipeline:
             values = self.learner_model.network(observations_batch)
             values = values.squeeze(-1) # 从 [B, 1] 压缩到 [B]
 
-            # --- 计算损失函数 (仅价值损失 MSE) ---
+            # 计算损失函数 (MSE)
             loss = F.mse_loss(values, target_batch)
             
-            # --- 反向传播和优化 ---
+            # 反向传播和优化
             self.optimizer.zero_grad()
             loss.backward()
             # 梯度裁剪，防止梯度爆炸
             nn.utils.clip_grad_norm_(self.learner_model.network.parameters(), TRAINING_CONFIG.MAX_GRAD_NORM)
             self.optimizer.step()
         
-        print(f"Loss: {loss.item():.4f}")
+        print(f"训练 Loss: {loss.item():.4f}, 经验池大小: {len(self.data_buffer)}")
 
     def run(self):
         """启动主训练循环"""
-        model_path = os.path.join(TRAINING_CONFIG.SAVEDIR, 'model.pt')
-        buffer_path = TRAINING_CONFIG.TRAIN_DATA_DIR  # 使用配置中的路径
+        model_path = TRAINING_CONFIG.MODEL_PATH
+        last_save_time = time.time()
 
         try:
-            for i in range(self.game_batch_num):
-                print(f"--- 批次 {i+1}/{self.game_batch_num} ---")
-                
-                # --- 从文件加载数据 ---
-                if os.path.exists(buffer_path):
-                    try:
-                        with open(buffer_path, 'rb') as f:
-                            # 添加文件锁或重试机制可以提高文件读取的稳定性，但这里保持简单
-                            data_file = pickle.load(f)
-                            self.data_buffer = data_file['data_buffer']
-                        print(f"成功载入 {len(self.data_buffer)} 条数据。")
-                    except Exception as e:
-                        print(f"载入数据失败: {e}, 等待下一轮...")
-                        time.sleep(CONFIG['train_update_interval'])
-                        continue
-                else:
-                    print("未找到数据文件，等待Actor生成数据...")
-                    time.sleep(CONFIG['train_update_interval'])
+            while not self.stop_event.is_set():
+                # --- 从队列加载数据 ---
+                try:
+                    # 尝试从队列中获取一批数据，设置超时以避免永久阻塞
+                    # 一次性获取多个数据以提高效率
+                    batch_data = self.data_queue.get(timeout=1.0)
+                    self.data_buffer.extend(batch_data)
+                except Empty:
+                    # 队列为空是正常现象，继续循环
+                    # 检查是否需要训练
+                    if len(self.data_buffer) > self.batch_size:
+                        self.update_network()
+                    else:
+                        time.sleep(0.1) # 短暂休眠，避免CPU空转
                     continue
+                except (IOError, EOFError):
+                    # 队列可能已损坏或关闭
+                    print("数据队列出现问题，训练终止。")
+                    break
 
                 # --- 执行训练 ---
-                self.update_network()
+                # 当经验池积累到一定程度后开始训练
+                if len(self.data_buffer) > self.batch_size:
+                    self.update_network()
                 
-                # 保存最新模型
-                try:
-                    torch.save(self.learner_model.network.state_dict(), model_path)
-                    print(f"模型已保存至: {model_path}")
-                except Exception as e:
-                    print(f"模型保存失败: {e}")
-
-                # 等待下一次更新
-                print(f"等待 {CONFIG['train_update_interval']} 秒...")
-                time.sleep(CONFIG['train_update_interval'])
+                # --- 定时保存模型 ---
+                current_time = time.time()
+                if current_time - last_save_time > CONFIG['save_interval']:
+                    try:
+                        torch.save(self.learner_model.network.state_dict(), model_path)
+                        print(f"模型已保存至: {model_path}")
+                        last_save_time = current_time
+                    except Exception as e:
+                        print(f"模型保存失败: {e}")
 
         except KeyboardInterrupt:
-            print("\n\r训练被手动中断。")
+            print("\n\r训练器被手动中断。")
+        except Exception as e:
+            print(f"训练器发生未知错误: {e}")
         finally:
             print(f"训练结束，保存最终模型到 {model_path}")
             torch.save(self.learner_model.network.state_dict(), model_path)
-
-if __name__ == '__main__':
-    # 确保SAVEDIR存在
-    os.makedirs(TRAINING_CONFIG.SAVEDIR, exist_ok=True)
-    
-    model_file_path = os.path.join(TRAINING_CONFIG.SAVEDIR, 'model.pt')
-    training_pipeline = TrainPipeline(init_model_path=model_file_path)
-    training_pipeline.run()
