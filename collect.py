@@ -7,18 +7,13 @@ import pickle
 import random
 from collections import deque
 
-# 游戏相关常量
-WINNING_SCORE = 60
-MAX_CONSECUTIVE_MOVES_FOR_DRAW = 12
-MAX_STEPS_PER_EPISODE = 100
-ACTION_SPACE_SIZE = 112
-HISTORY_WINDOW_SIZE = 15
-
-# 网络相关常量
-NETWORK_NUM_HIDDEN_CHANNELS = 64
-NETWORK_NUM_RES_BLOCKS = 5
-LSTM_HIDDEN_SIZE = 128
-EXP_EPSILON = 0.01
+# 导入统一配置
+from config import (
+    WINNING_SCORE, MAX_CONSECUTIVE_MOVES_FOR_DRAW, MAX_STEPS_PER_EPISODE,
+    ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE, NETWORK_NUM_HIDDEN_CHANNELS,
+    NETWORK_NUM_RES_BLOCKS, LSTM_HIDDEN_SIZE, EXP_EPSILON,
+    get_device, COLLECT_CONFIG
+)
 
 # 假设这些模块存在于您的项目中
 from environment import GameEnvironment
@@ -26,10 +21,10 @@ from net_model import Model
 
 # 配置字典，移除了MCTS相关参数，增加了epsilon
 CONFIG = {
-    'epsilon': 0.1,  # Epsilon for epsilon-greedy exploration
-    'buffer_size': 10000, # 经验池大小
-    'pytorch_model_path': 'current_policy.pkl', # 模型路径
-    'train_data_buffer_path': 'train_data_buffer.pkl' # 训练数据缓存路径
+    'epsilon': COLLECT_CONFIG.EPSILON,  # Epsilon for epsilon-greedy exploration
+    'buffer_size': COLLECT_CONFIG.BUFFER_SIZE, # 经验池大小
+    'pytorch_model_path': COLLECT_CONFIG.PYTORCH_MODEL_PATH, # 模型路径
+    'train_data_buffer_path': COLLECT_CONFIG.TRAIN_DATA_BUFFER_PATH # 训练数据缓存路径
 }
 
 
@@ -47,7 +42,7 @@ class CollectPipeline:
         self.init_model_path = init_model_path
 
         # 自动选择设备
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = get_device()
         print(f"Using device: {self.device}")
 
     def load_model(self):
@@ -71,23 +66,8 @@ class CollectPipeline:
         """
         使用 Epsilon-Greedy 策略预测动作。
         """
-        if np.random.rand() < self.epsilon:
-            # 探索：随机选择一个合法动作
-            return random.choice(legal_actions)
-        else:
-            # 利用：选择模型认为最优的动作
-            obs_board_t = torch.FloatTensor(obs['board']).to(self.device).unsqueeze(0)
-            obs_scalars_t = torch.FloatTensor(obs['scalars']).to(self.device).unsqueeze(0)
-
-            with torch.no_grad():
-                # 假设网络返回 log_probs 和 value
-                log_probs, _ = self.policy_value_net.network(obs_board_t, obs_scalars_t)
-            
-            action_probs = torch.exp(log_probs).cpu().numpy()[0]
-            
-            # 屏蔽非法动作，然后选择概率最高的
-            masked_probs = action_probs * self.env.get_action_mask()
-            return np.argmax(masked_probs)
+        # 使用Model类的predict方法，它已经实现了epsilon-greedy策略
+        return self.policy_value_net.predict(obs, legal_actions)
 
 
     def collect_selfplay_data(self, n_games=1):

@@ -6,15 +6,13 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional
 
-# ==============================================================================
-# --- 游戏常量定义 ---
+# 导入统一配置
+from config import (
+    WINNING_SCORE, MAX_CONSECUTIVE_MOVES_FOR_DRAW, MAX_STEPS_PER_EPISODE,
+    ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE, REVEAL_ACTIONS_COUNT,
+    REGULAR_MOVE_ACTIONS_COUNT, CANNON_ATTACK_ACTIONS_COUNT
+)
 
-# 游戏相关常量
-WINNING_SCORE = 60
-MAX_CONSECUTIVE_MOVES_FOR_DRAW = 12
-MAX_STEPS_PER_EPISODE = 100
-ACTION_SPACE_SIZE = 112  # 16个翻棋动作 + 48个移动动作 + 48个炮攻击动作
-HISTORY_WINDOW_SIZE = 15
 # ==============================================================================
 class PieceType(Enum):
     SOLDIER = 0
@@ -41,10 +39,6 @@ class Piece:
 BOARD_ROWS, BOARD_COLS = 4, 4
 NUM_PIECE_TYPES = 7
 TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
-
-REVEAL_ACTIONS_COUNT = 16
-REGULAR_MOVE_ACTIONS_COUNT = 48
-CANNON_ATTACK_ACTIONS_COUNT = 48
 
 PIECE_VALUES = {pt: val for pt, val in zip(PieceType, [4, 10, 10, 10, 10, 20, 30])}
 PIECE_MAX_COUNTS = {pt: val for pt, val in zip(PieceType, [2, 1, 1, 1, 1, 1, 1])}

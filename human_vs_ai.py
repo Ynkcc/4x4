@@ -14,9 +14,8 @@ import numpy as np
 import torch as th
 
 # 【修复】导入游戏环境的路径
-from environment import (GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ,
-                              ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT,
-                              MAX_CONSECUTIVE_MOVES_FOR_DRAW)
+from environment import GameEnvironment, PieceType, SQ_TO_POS, POS_TO_SQ
+from config import ACTION_SPACE_SIZE, REVEAL_ACTIONS_COUNT, REGULAR_MOVE_ACTIONS_COUNT, MAX_CONSECUTIVE_MOVES_FOR_DRAW, get_device
 
 # 导入新的AI模型
 try:
@@ -286,11 +285,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            device = th.device("cuda" if th.cuda.is_available() else "cpu")
+            device = get_device()
             self.ai_model = Model(self.game.observation_space, device)
             self.ai_model.network.load_state_dict(th.load(model_path, map_location=device))
             self.ai_status_label.setText("AI状态: 已加载")
-            self.log_message(f"成功加载AI模型: {model_path}")
+            self.log_message(f"成功加载AI模型: {model_path} (设备: {device})")
         except Exception as e:
             self.ai_status_label.setText("AI状态: 加载失败")
             self.log_message(f"加载AI模型失败: {str(e)}")

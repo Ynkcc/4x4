@@ -1,53 +1,118 @@
-# src_code/constants.py
+# config.py
+"""
+配置文件 - 统一管理所有项目配置
+"""
+import torch
 
-import os
-
-# --- 游戏和环境常量 (部分来自 environment.py, 统一管理) ---
+# ============================================================================
+# 游戏相关配置
+# ============================================================================
 WINNING_SCORE = 60
 MAX_CONSECUTIVE_MOVES_FOR_DRAW = 12
 MAX_STEPS_PER_EPISODE = 100
-ACTION_SPACE_SIZE = 112 # 16(翻棋) + 48(普通移动) + 48(炮攻击)
-
-# --- 网络结构超参数 ---
-NETWORK_NUM_HIDDEN_CHANNELS = 64
-NETWORK_NUM_RES_BLOCKS = 5
-LSTM_HIDDEN_SIZE = 128
-# 网络最终输出的融合特征维度，这里是动态计算的，但我们在这里定义一个常量来确保一致性
-# CNN展平后大小 (4x4xNETWORK_NUM_HIDDEN_CHANNELS) + FC输出大小 (64) + LSTM输出大小 (LSTM_HIDDEN_SIZE)
-NETWORK_FEATURES_DIM = 4 * 4 * NETWORK_NUM_HIDDEN_CHANNELS + 64 + LSTM_HIDDEN_SIZE
-
-# --- 历史动作编码超参数 ---
-# 历史动作序列的窗口大小
+ACTION_SPACE_SIZE = 112  # 16个翻棋动作 + 48个移动动作 + 48个炮攻击动作
 HISTORY_WINDOW_SIZE = 15
 
-# --- 训练超参数 ---
-XPID = 'dark_chess_self_play'
-SAVEDIR = 'saved_models'
-TOTAL_FRAMES = 100000 # 训练的总步数
-EXP_EPSILON = 0.01 # 探索概率
-BATCH_SIZE = 32
-UNROLL_LENGTH = 100 # Rollout的展开长度
-NUM_BUFFERS = 50 # 共享内存缓冲区的数量
-NUM_THREADS = 4 # 学习者线程数
-MAX_GRAD_NORM = 40.0
-LEARNING_RATE = 0.0001
-ALPHA = 0.99 # RMSProp平滑常数
-MOMENTUM = 0
-EPSILON = 1e-5 # RMSProp epsilon
+# 动作空间细分
+REVEAL_ACTIONS_COUNT = 16  # 翻棋动作数量
+REGULAR_MOVE_ACTIONS_COUNT = 48  # 移动动作数量
+CANNON_ATTACK_ACTIONS_COUNT = 48  # 炮攻击动作数量
 
-# --- 硬件配置 ---
-ACTOR_DEVICE_CPU = True # 是否使用CPU作为Actor设备
-GPU_DEVICES = '0' # GPU设备ID
-NUM_ACTOR_DEVICES = 1 # 用于模拟的设备数量
-NUM_ACTORS = 4 # 每个设备的Actor进程数
-TRAINING_DEVICE = 'cpu' # 用于训练的GPU设备ID, 'cpu'表示使用CPU
+# ============================================================================
+# 神经网络相关配置
+# ============================================================================
+NETWORK_NUM_HIDDEN_CHANNELS = 64
+NETWORK_NUM_RES_BLOCKS = 5
+LSTM_HIDDEN_SIZE = 128  # 保留LSTM相关配置以备不时之需
+GRU_HIDDEN_SIZE = 128
+EXP_EPSILON = 0.01
 
-# --- 蒙特卡洛 Rollout 超参数 ---
-# 每次Rollout时，对所有暗棋进行重新随机化的次数
-NUM_IMPERFECT_INFO_ROLLOUTS = 5
+# ============================================================================
+# 设备配置
+# ============================================================================
+def get_device():
+    """自动选择最佳可用设备"""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
 
-# --- 日志配置 ---
-TENSORBOARD_LOG_DIR = 'tensorboard_logs'
-LOG_INTERVAL_SEC = 10
-# 新增: 每隔多少 frames 更新一次日志和进度条
-LOG_INTERVAL_FRAMES = 10000
+# ============================================================================
+# 训练相关配置
+# ============================================================================
+class TrainingConfig:
+    # 设备配置
+    DEVICE = get_device()
+    
+    # 模型保存路径
+    SAVEDIR = 'saved_models'
+    MODEL_PATH = 'saved_models/model.pt'
+    TRAIN_DATA_BUFFER_PATH = 'train_data_buffer.pkl'  # 训练数据缓存路径
+    
+    # 优化器参数
+    LEARNING_RATE = 0.0001
+    MOMENTUM = 0
+    EPSILON = 1e-5
+    ALPHA = 0.99
+    MAX_GRAD_NORM = 40.0
+    
+    # DMC 训练参数
+    BATCH_SIZE = 512
+    EPOCHS = 1  # 每次更新的train_step数量 (DMC通常为1)
+    BUFFER_SIZE = 10000  # 经验池大小
+    GAME_BATCH_NUM = 1500  # 训练更新的总次数
+    TRAIN_UPDATE_INTERVAL = 10  # 每次更新的间隔时间(秒)
+
+# ============================================================================
+# 数据收集相关配置
+# ============================================================================
+class CollectConfig:
+    # 探索参数
+    EPSILON = 0.1  # Epsilon for epsilon-greedy exploration
+    
+    # 数据缓冲
+    BUFFER_SIZE = 10000  # 经验池大小
+    
+    # 文件路径
+    PYTORCH_MODEL_PATH = 'saved_models/model.pt'  # 模型路径
+    TRAIN_DATA_BUFFER_PATH = 'train_data_buffer.pkl'  # 训练数据缓存路径
+
+# ============================================================================
+# 人机对战相关配置
+# ============================================================================
+class HumanVsAIConfig:
+    # 模型路径
+    MODEL_PATH = 'saved_models/model.pt'
+    
+    # AI配置
+    AI_EPSILON = 0.0  # AI的探索率，通常设为0使其采用最优策略
+
+# ============================================================================
+# 向后兼容 - 提供全局变量访问方式
+# ============================================================================
+# 将配置类的属性暴露为模块级变量，以保持向后兼容性
+TRAINING_CONFIG = TrainingConfig()
+COLLECT_CONFIG = CollectConfig()
+HUMAN_VS_AI_CONFIG = HumanVsAIConfig()
+
+# 设备相关
+DEVICE = get_device()
+TRAINING_DEVICE = DEVICE
+
+# 训练相关
+LEARNING_RATE = TrainingConfig.LEARNING_RATE
+MOMENTUM = TrainingConfig.MOMENTUM
+EPSILON = TrainingConfig.EPSILON
+ALPHA = TrainingConfig.ALPHA
+MAX_GRAD_NORM = TrainingConfig.MAX_GRAD_NORM
+BATCH_SIZE = TrainingConfig.BATCH_SIZE
+EPOCHS = TrainingConfig.EPOCHS
+BUFFER_SIZE = TrainingConfig.BUFFER_SIZE
+GAME_BATCH_NUM = TrainingConfig.GAME_BATCH_NUM
+TRAIN_UPDATE_INTERVAL = TrainingConfig.TRAIN_UPDATE_INTERVAL
+SAVEDIR = TrainingConfig.SAVEDIR
+
+# 数据收集相关
+COLLECT_EPSILON = CollectConfig.EPSILON
+PYTORCH_MODEL_PATH = CollectConfig.PYTORCH_MODEL_PATH
+TRAIN_DATA_BUFFER_PATH = CollectConfig.TRAIN_DATA_BUFFER_PATH

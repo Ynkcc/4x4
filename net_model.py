@@ -6,13 +6,11 @@ from torch.nn import functional as F
 from typing import Dict, Tuple
 import random
 
-# 网络相关常量
-NETWORK_NUM_HIDDEN_CHANNELS = 64
-NETWORK_NUM_RES_BLOCKS = 5
-LSTM_HIDDEN_SIZE = 128
-ACTION_SPACE_SIZE = 112  # 16个翻棋动作 + 48个移动动作 + 48个炮攻击动作
-HISTORY_WINDOW_SIZE = 15
-EXP_EPSILON = 0.01
+# 导入统一配置
+from config import (
+    NETWORK_NUM_HIDDEN_CHANNELS, NETWORK_NUM_RES_BLOCKS, GRU_HIDDEN_SIZE,
+    ACTION_SPACE_SIZE, HISTORY_WINDOW_SIZE, EXP_EPSILON
+)
 
 class ResidualBlock(nn.Module):
     """
@@ -36,7 +34,7 @@ class ResidualBlock(nn.Module):
 class CustomNetwork(nn.Module):
     """
     自定义的神经网络，作为价值预测的特征提取器。
-    它包含三个分支：CNN(棋盘), MLP(标量), LSTM(历史动作)。
+    它包含三个分支：CNN(棋盘), MLP(标量), GRU(历史动作)。
     """
     def __init__(self, board_shape, scalars_shape):
         super(CustomNetwork, self).__init__()
@@ -61,8 +59,8 @@ class CustomNetwork(nn.Module):
             nn.ReLU()
         )
 
-        # --- LSTM 分支定义 (处理历史动作) ---
-        self.lstm = nn.LSTM(ACTION_SPACE_SIZE, LSTM_HIDDEN_SIZE, batch_first=True)
+        # --- GRU 分支定义 (处理历史动作) ---
+        self.gru = nn.GRU(ACTION_SPACE_SIZE, GRU_HIDDEN_SIZE, batch_first=True)
         
         # 计算CNN输出展平后的大小
         with th.no_grad():
@@ -71,8 +69,8 @@ class CustomNetwork(nn.Module):
             self.cnn_flat_size = cnn_output.shape[1:].numel()
         
         # --- 最终价值头 ---
-        # 融合后的特征维度: CNN_flat + MLP_output + LSTM_output
-        combined_features_dim = self.cnn_flat_size + 64 + LSTM_HIDDEN_SIZE
+        # 融合后的特征维度: CNN_flat + MLP_output + GRU_output
+        combined_features_dim = self.cnn_flat_size + 64 + GRU_HIDDEN_SIZE
         self.value_head = nn.Sequential(
             nn.Linear(combined_features_dim, 512),
             nn.ReLU(),
@@ -97,12 +95,12 @@ class CustomNetwork(nn.Module):
         # 2. MLP分支处理标量信息
         mlp_features = self.mlp(other_scalars)
         
-        # 3. LSTM分支处理历史动作
-        lstm_output, _ = self.lstm(history_vector_with_action)
-        lstm_features = lstm_output[:, -1, :] # 取最后一个时间步的输出
+        # 3. GRU分支处理历史动作
+        gru_output, _ = self.gru(history_vector_with_action)
+        gru_features = gru_output[:, -1, :] # 取最后一个时间步的输出
 
         # 4. 融合所有特征
-        combined_features = th.cat([cnn_features_flat, mlp_features, lstm_features], dim=1)
+        combined_features = th.cat([cnn_features_flat, mlp_features, gru_features], dim=1)
         
         # 5. 价值头预测
         value = self.value_head(combined_features)
