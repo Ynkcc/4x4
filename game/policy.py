@@ -1,124 +1,169 @@
-# custom_policy.py - 为stable-baselines3定义一个带有残差块和双输入的自定义策略网络
+# custom_policy.py - V5 终极版: 采用 Pervasive FiLM 深度调制, GAP 和 Pre-activation 结构
 import gymnasium as gym
 import torch as th
 import torch.nn as nn
-from torch.nn import functional as F
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from utils.constants import NETWORK_FEATURES_DIM, NETWORK_NUM_RES_BLOCKS, NETWORK_NUM_HIDDEN_CHANNELS
 
-class ResidualBlock(nn.Module):
+# --- 激活函数选择 ---
+# 使用 SiLU (Swish) 替代 ReLU，因为它在许多现代架构中表现更好
+ACTIVATION_FN = nn.SiLU
+
+# --- 注意力与调制模块 ---
+
+class SqueezeExcitation(nn.Module):
     """
-    ResNet 的基本残差块。
-    通过"跳跃连接"允许梯度更有效地传播，使得训练更深的网络成为可能。
+    Squeeze-and-Excitation (SE) 模块，实现通道注意力。
     """
-    def __init__(self, num_channels: int):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(num_channels)
-        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(num_channels)
+    def __init__(self, in_channels: int, reduction_ratio: int = 4):
+        super(SqueezeExcitation, self).__init__()
+        reduced_channels = in_channels // reduction_ratio
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(in_channels, reduced_channels, bias=False),
+            ACTIVATION_FN(),
+            nn.Linear(reduced_channels, in_channels, bias=False),
+            nn.Sigmoid()
+        )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
+        b, c, _, _ = x.shape
+        y = self.squeeze(x).view(b, c)
+        y = self.excitation(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+class FiLMLayer(nn.Module):
+    """
+    Feature-wise Linear Modulation (FiLM) 层。
+    """
+    def __init__(self):
+        super(FiLMLayer, self).__init__()
+
+    def forward(self, cnn_features: th.Tensor, film_params: th.Tensor) -> th.Tensor:
+        # film_params 的维度是 (batch_size, 2 * num_cnn_features)
+        # 将其分割为 gamma 和 beta
+        gamma, beta = th.chunk(film_params, 2, dim=1)
+        
+        # 调整 gamma 和 beta 的形状以匹配 cnn_features
+        # cnn_features: (batch, channels, height, width)
+        # gamma/beta: (batch, channels) -> (batch, channels, 1, 1)
+        gamma = gamma.unsqueeze(2).unsqueeze(3).expand_as(cnn_features)
+        beta = beta.unsqueeze(2).unsqueeze(3).expand_as(cnn_features)
+        
+        # 应用FiLM: modulated_features = gamma * cnn_features + beta
+        return gamma * cnn_features + beta
+
+# --- 核心网络块 ---
+
+class ResidualAttentionFiLMBlock(nn.Module):
+    """
+    【V5 改进】采用 "Pre-activation" 结构，并在内部集成了FiLM调制的注意力残差块。
+    结构: BN -> SiLU -> Conv -> FiLM -> BN -> SiLU -> Conv -> Attention -> +
+    """
+    def __init__(self, num_channels: int):
+        super(ResidualAttentionFiLMBlock, self).__init__()
+        self.bn1 = nn.BatchNorm2d(num_channels)
+        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(num_channels)
+        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, padding=1, bias=False)
+        self.attention = SqueezeExcitation(num_channels)
+        self.activation = ACTIVATION_FN()
+        self.film_layer = FiLMLayer() # 每个残差块都有自己的FiLM层
+
+    def forward(self, x: th.Tensor, film_params: th.Tensor) -> th.Tensor:
         residual = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += residual  # 核心的残差连接
-        out = F.relu(out)
+        # Pre-activation
+        out = self.activation(self.bn1(x))
+        out = self.conv1(out)
+        
+        # 在残差块内部应用FiLM调制
+        out = self.film_layer(out, film_params)
+        
+        out = self.activation(self.bn2(out))
+        out = self.conv2(out)
+        out = self.attention(out)
+        out += residual
         return out
+
+# --- 主网络架构 ---
 
 class CustomNetwork(BaseFeaturesExtractor):
     """
     自定义的神经网络，作为特征提取器。
-    它包含两个分支：
-    1. CNN分支：处理棋盘的"图像"表示 (16, 4, 4)，使用残差块提取空间特征。
-       - 16个通道：我方7种棋子 + 敌方7种棋子 + 暗棋 + 空位
-    2. FC分支：处理得分等全局"标量"信息 (19,)。
-       - 19个标量：我方得分 + 敌方得分 + 连续未吃子步数 + 我方存活棋子(8) + 敌方存活棋子(8)
-    最后将两个分支的特征融合在一起。
+    <--- V5 终极版 --->
+    采用Pervasive FiLM深度调制，在每个残差块中都进行特征融合。
+    使用全局平均池化(GAP)替代Flatten，增强模型鲁棒性。
     """
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = NETWORK_FEATURES_DIM, num_res_blocks: int = NETWORK_NUM_RES_BLOCKS, num_hidden_channels: int = NETWORK_NUM_HIDDEN_CHANNELS):
-        # features_dim 是融合后特征的总维度，这里我们动态计算它，并将其传递给策略和价值头
         super(CustomNetwork, self).__init__(observation_space, features_dim)
         
         board_space = observation_space['board']
         scalars_space = observation_space['scalars']
         
-        # --- CNN 分支定义 ---
+        # --- 1. CNN 分支定义 (用于处理棋盘) ---
         in_channels = board_space.shape[0]
-        # 初始卷积层
-        cnn_head = [
-            nn.Conv2d(in_channels, num_hidden_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(num_hidden_channels),
-            nn.ReLU()
-        ]
-        # 中间的残差块
-        res_blocks = [ResidualBlock(num_hidden_channels) for _ in range(num_res_blocks)]
-        self.cnn = nn.Sequential(*cnn_head, *res_blocks)
+        # 初始卷积层，将输入通道数转换为隐藏通道数
+        self.cnn_head = nn.Conv2d(in_channels, num_hidden_channels, kernel_size=3, padding=1, bias=False)
         
-        # 计算CNN输出展平后的大小
-        # 我们需要一个虚拟输入来动态计算这个大小
-        with th.no_grad():
-            dummy_input = th.zeros(1, *board_space.shape)
-            cnn_output = self.cnn(dummy_input)
-            # 排除批次维度，只计算特征维度
-            self.cnn_flat_size = cnn_output.shape[1:].numel()
-
-        # --- 全连接 (FC) 分支定义 ---
-        # <--- 变更点3：增加FC分支的深度和宽度
-        self.fc = nn.Sequential(
-            nn.Linear(scalars_space.shape[0], 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU()
+        # V5 改进: 改为 ModuleList 以便迭代并传入FiLM参数
+        self.res_blocks = nn.ModuleList([ResidualAttentionFiLMBlock(num_hidden_channels) for _ in range(num_res_blocks)])
+        
+        # --- 2. 增强的FC分支 (用于处理标量并生成FiLM参数) ---
+        scalar_input_dim = scalars_space.shape[0]
+        # V5 改进: 为每一个残差块都生成一组独立的FiLM参数 (gamma + beta)
+        film_params_dim_per_block = num_hidden_channels * 2
+        total_film_params_dim = film_params_dim_per_block * num_res_blocks
+        
+        self.scalar_encoder = nn.Sequential(
+            nn.Linear(scalar_input_dim, 256),
+            nn.LayerNorm(256),
+            ACTIVATION_FN(),
+            nn.Linear(256, total_film_params_dim),
         )
-        fc_output_size = 64
+
+        # --- 3. 最终的 Fusion Head ---
+        # V5 改进: 使用全局平均池化层替代Flatten
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
         
-        # --- 计算融合后的总特征维度 ---
-        self._features_dim = self.cnn_flat_size + fc_output_size
-        
-        # <--- 变更点4：在融合之后添加额外的隐藏层
-        self.post_fusion_head = nn.Sequential(
-            nn.Linear(self._features_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, features_dim),
-            nn.ReLU()
+        # V5 改进: fusion_head的输入维度现在只与隐藏通道数相关，不再与棋盘尺寸相关
+        self.fusion_head = nn.Sequential(
+            nn.Linear(num_hidden_channels, 512),
+            nn.LayerNorm(512),
+            ACTIVATION_FN(),
+            nn.Linear(512, features_dim) # 最终输出，不加激活函数
         )
-        self._features_dim = features_dim
-
-
+        
     def forward(self, observations: Dict[str, th.Tensor]) -> th.Tensor:
-        # 从字典中分离出两部分输入
         board_obs = observations['board']
         scalars_obs = observations['scalars']
 
-        # 1. 通过CNN分支处理棋盘图像
-        cnn_features = self.cnn(board_obs)
-        # 展平CNN的输出，以便与FC分支拼接
-        cnn_features_flat = cnn_features.reshape(cnn_features.size(0), -1)
+        # 1. 标量路径: 一次性生成所有残差块所需的FiLM参数
+        all_film_params = self.scalar_encoder(scalars_obs)
+        # 将参数分割成每个块对应的部分
+        film_params_per_block = th.chunk(all_film_params, len(self.res_blocks), dim=1)
         
-        # 2. 通过FC分支处理标量信息
-        fc_features = self.fc(scalars_obs)
+        # 2. CNN路径:
+        # a. 初始卷积
+        cnn_features = self.cnn_head(board_obs)
+        # b. V5 改进: 依次通过每个残差块，并传入对应的FiLM参数进行深度调制
+        for i, block in enumerate(self.res_blocks):
+            cnn_features = block(cnn_features, film_params_per_block[i])
         
-        # 3. 融合两个分支的特征
-        combined_features = th.cat([cnn_features_flat, fc_features], dim=1)
+        # 3. V5 改进: 使用全局平均池化并展平
+        pooled_features = self.global_pool(cnn_features)
+        features_flat = th.flatten(pooled_features, 1)
         
-        # 4. <--- 变更点5：将融合后的特征输入到新的隐藏层中
-        final_features = self.post_fusion_head(combined_features)
+        # 4. 将最终处理过的特征送入Fusion Head
+        final_features = self.fusion_head(features_flat)
         
         return final_features
 
 class CustomActorCriticPolicy(MaskableActorCriticPolicy):
     """
     自定义的Actor-Critic策略。
-    这个类告诉stable-baselines3使用我们上面定义的 `CustomNetwork` 作为特征提取器，
-    而不是默认的CNN或MLP网络。
     """
     def __init__(
         self,
@@ -128,9 +173,7 @@ class CustomActorCriticPolicy(MaskableActorCriticPolicy):
         *args,
         **kwargs,
     ):
-        # 显式地将我们的自定义网络设置为特征提取器
         kwargs["features_extractor_class"] = CustomNetwork
-        # 可以通过 policy_kwargs 传递参数给 CustomNetwork, 例如 {'num_res_blocks': 5}
         super(CustomActorCriticPolicy, self).__init__(
             observation_space,
             action_space,

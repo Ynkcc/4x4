@@ -28,7 +28,7 @@ TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_fin
 
 # --- 游戏环境超参数 (新增) ---
 # 奖励塑形系数 (初始值)
-SHAPING_COEF_INITIAL = 0.05
+SHAPING_COEF_INITIAL = 0.1
 # 奖励塑形系数 (衰减后的最终值)
 SHAPING_COEF_FINAL = 0.0001
 # 在第几次训练循环时，塑形系数衰减到最终值 (例如，在总循环数的一半时完成衰减)
@@ -66,7 +66,7 @@ PPO_SHOW_PROGRESS = True
 # 特征提取器输出维度 (默认: 256)
 NETWORK_FEATURES_DIM = 256
 # 残差块数量 (默认: 4)
-NETWORK_NUM_RES_BLOCKS = 4
+NETWORK_NUM_RES_BLOCKS = 6
 # 隐藏层通道数 (默认: 64)
 NETWORK_NUM_HIDDEN_CHANNELS = 64
 
@@ -87,7 +87,7 @@ ELO_WEIGHT_TEMPERATURE = 100
 
 # --- 训练超参数 ---
 # 总共进行多少次 "训练 -> 评估" 的循环
-TOTAL_TRAINING_LOOPS = 100
+TOTAL_TRAINING_LOOPS = 1000
 # 并行环境数量
 N_ENVS = 8
 # 在每次评估之间，学习者训练多少步
@@ -97,6 +97,6 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # 评估时进行多少局游戏 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 100
 # 挑战者胜率需要超过多少才能取代主宰者
-EVALUATION_THRESHOLD = 0.6
+EVALUATION_THRESHOLD = 0.51
 # 评估时使用的并行环境数量 (评估时通常用1个)
 EVALUATION_N_ENVS = 1
