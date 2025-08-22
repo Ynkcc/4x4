@@ -164,7 +164,8 @@ class GameEnvironment(gym.Env):
             final_reward = reward
             if terminated:
                 if winner == self.learning_player_id: final_reward += 1.0
-                elif winner == -self.learning_player_id: final_reward += -1.0
+                elif winner == -self.learning_player_id: final_reward += -0.8
+                else: final_reward += -0.1 # 平局略微惩罚
             elif truncated:
                 final_reward += -0.5
             return self.get_state(), np.float32(final_reward), terminated, truncated, {
@@ -196,7 +197,8 @@ class GameEnvironment(gym.Env):
                     
                     if terminated:
                         if winner == self.learning_player_id: reward += 1.0
-                        elif winner == -self.learning_player_id: reward += -1.0
+                        elif winner == -self.learning_player_id: reward += -0.8
+                        else: reward += -0.1 # 平局略微惩罚
                     elif truncated:
                         reward += -0.5
                 except Exception as e:

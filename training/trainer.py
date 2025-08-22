@@ -70,9 +70,9 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
 
 class SelfPlayTrainer:
     """
-    【V6 重构版】
+    【V7 新规则版】
     - 以 "挑战者" 为核心进行持续训练。
-    - 对手池分为 "长期" 和 "短期" 池。
+    - 对手池分为 "长期" 和 "短期" 池，采用新的动态差值规则。
     - 实现了更科学的历史模型保留和采样机制。
     """
     def __init__(self):
@@ -80,9 +80,10 @@ class SelfPlayTrainer:
         self.env = None
         self.tensorboard_log_run_path = None
         
-        # --- 对手池核心属性 (重构) ---
+        # --- 对手池核心属性 (新规则) ---
         self.long_term_pool_paths = []
         self.short_term_pool_paths = []
+        self.long_term_power_of_2 = 1 # 记录长期模型中2的指数，初始为1
         # 【修改】现在只用一个字典来存储所有对手数据
         self.combined_opponent_data: List[Dict[str, Any]] = []
 
@@ -122,6 +123,7 @@ class SelfPlayTrainer:
                  self.model_generations[main_opp_name] = self.model_generations.get(challenger_name, 0)
             self._save_elo_and_generations()
 
+        # 启动时进行一次池管理（主要用于清理无效文件）
         self._manage_opponent_pool()
 
     def _create_initial_models(self):
@@ -151,7 +153,7 @@ class SelfPlayTrainer:
         print("✅ 临时环境已清理")
 
     def _load_elo_and_generations(self):
-        """从JSON文件加载Elo评分和模型代数。"""
+        """从JSON文件加载Elo评分、模型代数和新的模型池状态。"""
         elo_file = os.path.join(SELF_PLAY_OUTPUT_DIR, "elo_ratings.json")
         if os.path.exists(elo_file):
             try:
@@ -160,57 +162,120 @@ class SelfPlayTrainer:
                     self.elo_ratings = data.get("elo", {})
                     self.model_generations = data.get("generations", {})
                     self.latest_generation = data.get("latest_generation", 0)
+                    # 加载新的模型池属性
+                    self.long_term_pool_paths = data.get("long_term_pool_paths", [])
+                    self.short_term_pool_paths = data.get("short_term_pool_paths", [])
+                    self.long_term_power_of_2 = data.get("long_term_power_of_2", 1)
             except (json.JSONDecodeError, IOError, KeyError) as e:
-                print(f"警告：读取Elo文件失败或格式不完整: {e}。将使用默认值。")
+                print(f"警告：读取状态文件失败或格式不完整: {e}。将使用默认值。")
                 self.elo_ratings = {}
                 self.model_generations = {}
                 self.latest_generation = 0
+                self.long_term_pool_paths = []
+                self.short_term_pool_paths = []
+                self.long_term_power_of_2 = 1
     
     def _save_elo_and_generations(self):
-        """将Elo和模型代数保存到同一个JSON文件。"""
+        """将Elo、模型代数和模型池状态保存到同一个JSON文件。"""
         elo_file = os.path.join(SELF_PLAY_OUTPUT_DIR, "elo_ratings.json")
         data = {
             "elo": self.elo_ratings,
             "generations": self.model_generations,
-            "latest_generation": self.latest_generation
+            "latest_generation": self.latest_generation,
+            # 保存新的模型池属性
+            "long_term_pool_paths": self.long_term_pool_paths,
+            "short_term_pool_paths": self.short_term_pool_paths,
+            "long_term_power_of_2": self.long_term_power_of_2,
         }
         try:
             with open(elo_file, 'w') as f:
                 json.dump(data, f, indent=4)
         except IOError as e:
-            print(f"错误：无法保存Elo评分文件: {e}")
+            print(f"错误：无法保存状态文件: {e}")
 
     def _manage_opponent_pool(self, new_opponent_path=None):
         """
-        管理长期和短期对手池。
+        【V7 新规则】管理长期和短期对手池。
         """
+        # 1. 如果有新模型产生，处理它的入池逻辑
         if new_opponent_path:
             self.latest_generation += 1
             new_opponent_name = os.path.basename(new_opponent_path)
             self.model_generations[new_opponent_name] = self.latest_generation
-            self._save_elo_and_generations()
+            
+            added_to_long_term = False
+            
+            # 总是按代数对长期池进行排序，以确保逻辑正确
+            long_term_pool_with_gens = sorted(
+                [(p, self.model_generations.get(p, 0)) for p in self.long_term_pool_paths],
+                key=lambda x: x[1]
+            )
+            self.long_term_pool_paths = [p for p, _ in long_term_pool_with_gens]
+            long_term_gens = [g for _, g in long_term_pool_with_gens]
 
-        all_opponents = []
+            # --- 应用新的长期池规则 ---
+            # 规则1: 长期池为空，直接加入
+            if not self.long_term_pool_paths:
+                print(f"长期池为空，新模型 {new_opponent_name} 直接加入。")
+                self.long_term_pool_paths.append(new_opponent_name)
+                added_to_long_term = True
+            else:
+                required_gap = 2 ** self.long_term_power_of_2
+                actual_gap = self.latest_generation - long_term_gens[-1]
+
+                # 检查新模型是否满足当前的代数差值要求
+                if actual_gap == required_gap:
+                    # 规则3: 长期池已满，触发更新
+                    if len(self.long_term_pool_paths) >= LONG_TERM_POOL_SIZE:
+                        print(f"长期池已满且满足差值 {required_gap}，触发指数更新。")
+                        self.long_term_power_of_2 += 1
+                        new_required_gap = 2 ** self.long_term_power_of_2
+                        print(f"2的指数提升至 {self.long_term_power_of_2} (新差值为 {new_required_gap})。")
+                        
+                        # 根据新差值重建长期池
+                        retained_pool = [self.long_term_pool_paths[0]] # 始终保留最老的模型
+                        last_kept_gen = long_term_gens[0]
+                        
+                        for i in range(1, len(long_term_gens)):
+                            if (long_term_gens[i] - last_kept_gen) == new_required_gap:
+                                retained_pool.append(self.long_term_pool_paths[i])
+                                last_kept_gen = long_term_gens[i]
+                        
+                        self.long_term_pool_paths = retained_pool
+                        print(f"长期池更新后保留 {len(self.long_term_pool_paths)} 个模型。")
+                        
+                        # 更新后，再次检查新模型是否能加入
+                        new_last_gen = self.model_generations.get(self.long_term_pool_paths[-1], 0)
+                        if len(self.long_term_pool_paths) < LONG_TERM_POOL_SIZE and (self.latest_generation - new_last_gen) == new_required_gap:
+                            self.long_term_pool_paths.append(new_opponent_name)
+                            added_to_long_term = True
+                            print(f"新模型 {new_opponent_name} 在更新后成功加入长期池。")
+
+                    # 规则2: 长期池未满，直接加入
+                    else:
+                        self.long_term_pool_paths.append(new_opponent_name)
+                        added_to_long_term = True
+                        print(f"长期池未满，新模型 {new_opponent_name} 成功加入。")
+
+            # --- 如果无法加入长期池，则尝试加入短期池 ---
+            if not added_to_long_term:
+                self.short_term_pool_paths.append(new_opponent_name)
+                
+                # 按代数降序排序短期池
+                self.short_term_pool_paths.sort(
+                    key=lambda p: self.model_generations.get(p, 0),
+                    reverse=True
+                )
+                
+                # 如果短期池超员，移除最旧的
+                if len(self.short_term_pool_paths) > SHORT_TERM_POOL_SIZE:
+                    self.short_term_pool_paths = self.short_term_pool_paths[:SHORT_TERM_POOL_SIZE]
+        
+        # 2. 清理阶段：移除所有不在池中的模型文件
+        current_pool_names = set(self.short_term_pool_paths + self.long_term_pool_paths)
+        
         for filename in os.listdir(OPPONENT_POOL_DIR):
-            if filename.endswith('.zip'):
-                gen = self.model_generations.get(filename, 0)
-                all_opponents.append((filename, gen))
-        
-        all_opponents.sort(key=lambda x: x[1], reverse=True)
-        self.short_term_pool_paths = [os.path.join(OPPONENT_POOL_DIR, name) for name, gen in all_opponents[:SHORT_TERM_POOL_SIZE]]
-        candidates_for_long_term = all_opponents[SHORT_TERM_POOL_SIZE:]
-        
-        self.long_term_pool_paths = []
-        for opp_name, opp_gen in candidates_for_long_term:
-            if len(self.long_term_pool_paths) >= LONG_TERM_POOL_SIZE:
-                break
-            age = self.latest_generation - opp_gen
-            if age > 0 and (age & (age - 1) == 0):
-                self.long_term_pool_paths.append(os.path.join(OPPONENT_POOL_DIR, opp_name))
-        
-        current_pool_names = {os.path.basename(p) for p in self.short_term_pool_paths + self.long_term_pool_paths}
-        for filename, _ in all_opponents:
-            if filename not in current_pool_names:
+            if filename.endswith('.zip') and filename not in current_pool_names:
                 print(f"✂️ 清理过时对手: {filename}")
                 os.remove(os.path.join(OPPONENT_POOL_DIR, filename))
                 self.elo_ratings.pop(filename, None)
@@ -218,6 +283,7 @@ class SelfPlayTrainer:
         
         self._save_elo_and_generations()
         self._update_opponent_data()
+
 
     def _update_opponent_data(self):
         """
@@ -233,7 +299,9 @@ class SelfPlayTrainer:
         main_elo = self.elo_ratings[main_opponent_name]
         
         weights = []
-        models_to_load = final_pool_for_env + [MAIN_OPPONENT_PATH]
+        # 【修改】将池中的文件名转换为完整路径
+        pool_paths = [os.path.join(OPPONENT_POOL_DIR, filename) for filename in final_pool_for_env]
+        models_to_load = pool_paths + [MAIN_OPPONENT_PATH]
 
         # 1. 加载所有模型并计算权重
         loaded_models = {}
@@ -279,12 +347,17 @@ class SelfPlayTrainer:
 
         # 打印状态
         print("\n--- 对手池状态 ---")
-        print(f"短期池 ({len(self.short_term_pool_paths)}/{SHORT_TERM_POOL_SIZE}): {[os.path.basename(p) for p in self.short_term_pool_paths]}")
-        print(f"长期池 ({len(self.long_term_pool_paths)}/{LONG_TERM_POOL_SIZE}): {[os.path.basename(p) for p in self.long_term_pool_paths]}")
+        print(f"短期池 ({len(self.short_term_pool_paths)}/{SHORT_TERM_POOL_SIZE}): {self.short_term_pool_paths}")
+        print(f"长期池 ({len(self.long_term_pool_paths)}/{LONG_TERM_POOL_SIZE}): {self.long_term_pool_paths}")
+        print(f"长期池代数差值指数: {self.long_term_power_of_2} (当前要求差值: {2**self.long_term_power_of_2})")
+        
         print("\n对手池采样权重已更新:")
-        for item in self.combined_opponent_data:
+        # 排序以获得更稳定的输出
+        sorted_opponent_data = sorted(self.combined_opponent_data, key=lambda x: os.path.basename(x['path']))
+        for item in sorted_opponent_data:
             elo = self.elo_ratings.get(os.path.basename(item['path']), self.default_elo)
-            print(f"  - {os.path.basename(item['path']):<20} (Elo: {elo:.0f}, 权重: {item['weight']:.2%})")
+            print(f"  - {os.path.basename(item['path']):<25} (Elo: {elo:.0f}, 权重: {item['weight']:.2%})")
+
 
     def _prepare_environment_and_models(self):
         """准备用于训练的模型和环境。"""
@@ -355,6 +428,7 @@ class SelfPlayTrainer:
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
+            # 使用最新代数来命名旧的主宰者
             old_main_gen = self.latest_generation + 1
             new_opponent_name = f"opponent_{old_main_gen}.zip"
             new_opponent_path = os.path.join(OPPONENT_POOL_DIR, new_opponent_name)
@@ -367,6 +441,7 @@ class SelfPlayTrainer:
             self.elo_ratings[main_opponent_name] = self.elo_ratings[challenger_name]
             print(f"挑战者已成为新主宰者！")
 
+            # 在这里，new_opponent_path是刚刚退役的主宰者，送入池中进行管理
             self._manage_opponent_pool(new_opponent_path=new_opponent_path)
             
             print(f"🔥 发送指令，在所有 {N_ENVS} 个并行环境中更新对手池...")
@@ -423,7 +498,7 @@ class SelfPlayTrainer:
             print(f"\n--- [步骤 4/5] 训练完成！ ---")
             
         finally:
-            print("\n正在保存最终的Elo评分和模型代数...")
+            print("\n正在保存最终的状态文件...")
             self._save_elo_and_generations()
             if self.env:
                 print("\n--- [步骤 5/5] 清理环境 ---")

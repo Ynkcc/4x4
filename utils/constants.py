@@ -27,9 +27,9 @@ TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_fin
 # --- 2. 游戏环境超参数 (可调优) ---
 # ==============================================================================
 # 奖励塑形(Reward Shaping)系数的初始值，用于引导模型学习
-SHAPING_COEF_INITIAL = 0.1
+SHAPING_COEF_INITIAL = 0.001
 # 奖励塑形系数衰减后的最终值
-SHAPING_COEF_FINAL = 0.0001
+SHAPING_COEF_FINAL = 0.000001
 # 奖励塑形系数衰减完成所需的训练循环次数
 SHAPING_DECAY_END_LOOP = 50
 
@@ -42,9 +42,9 @@ INITIAL_LR = 0.0006220186927724994
 # PPO 裁剪范围 (Clip Range) - 使用最佳超参数
 PPO_CLIP_RANGE = 0.1
 # 每次更新前，每个环境收集的步数 - 使用最佳超参数
-PPO_N_STEPS = 4096
+PPO_N_STEPS = 512
 # 训练时每个 mini-batch 的大小 - 使用最佳超参数
-PPO_BATCH_SIZE = 128
+PPO_BATCH_SIZE = 256
 # 每次更新时，对采集到的数据进行优化的轮数 - 使用最佳超参数
 PPO_N_EPOCHS = 19
 # GAE (Generalized Advantage Estimation) 的 lambda 参数 - 使用最佳超参数
@@ -108,6 +108,6 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # 每次评估时进行的游戏局数 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 100
 # 挑战者胜率需要超过此阈值才能取代主宰者
-EVALUATION_THRESHOLD = 0.60
+EVALUATION_THRESHOLD = 0.55
 # 评估时使用的并行环境数量 (通常为1)
 EVALUATION_N_ENVS = 1
