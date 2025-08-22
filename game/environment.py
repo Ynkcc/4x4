@@ -8,6 +8,9 @@ from gymnasium import spaces
 from typing import Optional, Any, List, Dict, Tuple
 import math
 
+# --- 【新增】导入调试常量 ---
+from utils.constants import USE_FIXED_SEED_FOR_TRAINING, FIXED_SEED_VALUE
+
 # ==============================================================================
 # --- 游戏常量与类型定义 ---
 # ==============================================================================
@@ -151,6 +154,9 @@ class GameEnvironment(gym.Env):
 
     def _internal_reset(self, seed: Optional[int] = None):
         """内部重置，仅重置游戏状态，不处理对手选择或先手轮换。"""
+        if USE_FIXED_SEED_FOR_TRAINING:
+            # 如果启用了固定种子，则忽略外部传入的seed，使用常量中定义的值
+            seed = FIXED_SEED_VALUE
         super().reset(seed=seed)
         self._initialize_board()
 
@@ -163,10 +169,6 @@ class GameEnvironment(gym.Env):
         if self.current_opponent_path and self.current_opponent_path in self.opponent_completed_games:
             self.opponent_completed_games[self.current_opponent_path] += 1
 
-        # 暂时固定种子，在训练前期使用
-        seed=42
-        np.random.seed(seed)
-        random.seed(seed)
 
         self._internal_reset(seed)
         self._select_active_opponent()
@@ -500,7 +502,9 @@ class GameEnvironment(gym.Env):
     def _initialize_board(self):
         self._reset_internal_state()
         pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
-        rng = self.np_random if hasattr(self, 'np_random') and self.np_random else random
+        # --- 【核心修改】使用 self.np_random (由 super().reset(seed=...) 创建) 来洗牌 ---
+        # 确保随机性来源一致且可复现
+        rng = self.np_random
         rng.shuffle(pieces)
         for sq, piece in enumerate(pieces):
             self.board[sq] = piece
