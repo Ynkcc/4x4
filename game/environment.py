@@ -1,4 +1,4 @@
-# src_code/game/environment.py (最终重构版)
+# src_code/game/environment.py (已修复)
 import os
 import random
 from enum import Enum
@@ -6,13 +6,14 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Any, List, Dict, Tuple
+import math
 
 # ==============================================================================
 # --- 游戏常量与类型定义 ---
 # ==============================================================================
 
 WINNING_SCORE = 60
-MAX_CONSECUTIVE_MOVES_FOR_DRAW = 24
+MAX_CONSECUTUTIVE_MOVES_FOR_DRAW = 24
 MAX_STEPS_PER_EPISODE = 100
 BOARD_ROWS, BOARD_COLS = 4, 4
 TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
@@ -102,6 +103,15 @@ class GameEnvironment(gym.Env):
         self.attack_tables: Dict[str, np.ndarray] = {}
         self.action_to_coords: Dict[int, Any] = {}
         self.coords_to_action: Dict[Any, int] = {}
+        self._first_player_alternator: int = 1
+        
+        # --- 用于持久化对手选择逻辑的状态 ---
+        self.opponent_weights: Dict[str, float] = {}
+        self.opponent_target_games: Dict[str, int] = {}
+        self.opponent_completed_games: Dict[str, int] = {}
+        self.current_opponent_path: Optional[str] = None
+        self.game_phase_multiplier: int = 20
+        
         self._initialize_lookup_tables()
 
     def _initialize_spaces(self):
@@ -134,26 +144,118 @@ class GameEnvironment(gym.Env):
 
     def reload_opponent_pool(self, new_opponent_data: List[Dict[str, Any]]):
         self.opponent_data = new_opponent_data
+        # 强制重置对手选择状态。
+        # _select_active_opponent 将会检测到权重不匹配并重新生成所有目标和计数。
+        self.opponent_weights = {}
         return True
 
-    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
+    def _internal_reset(self, seed: Optional[int] = None):
+        """内部重置，仅重置游戏状态，不处理对手选择或先手轮换。"""
         super().reset(seed=seed)
-        self._select_active_opponent()
         self._initialize_board()
+
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
+        """
+        重置游戏环境。
+        此方法会轮换先手玩家。如果轮到对手先手，则会让对手模型先执行一步。
+        """
+        # 如果一局游戏刚刚结束，为刚刚对战过的对手增加完成局数计数
+        if self.current_opponent_path and self.current_opponent_path in self.opponent_completed_games:
+            self.opponent_completed_games[self.current_opponent_path] += 1
+
+        # 暂时固定种子，在训练前期使用
+        seed=42
+        np.random.seed(seed)
+        random.seed(seed)
+
+        self._internal_reset(seed)
+        self._select_active_opponent()
+
+        # 轮换先手玩家
+        self.current_player = self._first_player_alternator
+        self._first_player_alternator *= -1  # 为下一次reset翻转
+
+        # 如果对手是先手，并且存在对手模型，则让对手先走一步
+        if self.active_opponent and self.current_player != self.learning_player_id:
+            # _execute_opponent_move 内部会使用 self.current_player 获取状态并执行动作,
+            # 它不会改变 self.current_player 的值。
+            # 函数返回元组 (reward, terminated, truncated, winner), 在此忽略。
+            self._execute_opponent_move()
+            
+            # 对手下完后，轮到学习玩家
+            self.current_player *= -1
+
         info = {'action_mask': self.action_masks(), 'winner': None}
         return self.get_state(), info
 
     def _select_active_opponent(self):
-        if self.active_opponent and not self.opponent_data: return
+        """
+        根据持久化的目标和已完成局数选择对手，以减少模型切换。
+        """
         if not self.opponent_data:
             self.active_opponent = None
             return
-        paths = [item['path'] for item in self.opponent_data]
-        weights = [item['weight'] for item in self.opponent_data]
-        chosen_path = self.np_random.choice(paths, p=weights)
-        chosen_model_data = next((item for item in self.opponent_data if item['path'] == chosen_path), None)
-        if chosen_model_data is None: raise ValueError(f"环境内错误：找不到预加载的对手模型 {chosen_path}。")
+
+        # 1. 检测模型池是否变更，如果变更则重置相关状态
+        current_weights = {item['path']: item['weight'] for item in self.opponent_data}
+        if self.opponent_weights != current_weights:
+            self.opponent_weights = current_weights
+            self.opponent_completed_games = {item['path']: 0 for item in self.opponent_data}
+            
+            # --- 【错误修复】 ---
+            # 此处的 game_phase_multiplier 不应被重置。
+            # 它代表了训练的整体进度，重置它会导致训练难度循环，无法持续提升。
+            # 前期暂不移除
+            self.game_phase_multiplier = 20 # <--- 已移除此行错误代码
+            
+            self.opponent_target_games = {
+                item['path']: math.ceil(item['weight'] * self.game_phase_multiplier)
+                for item in self.opponent_data
+            }
+
+        # 2. 检查当前阶段是否已完成
+        # 使用 self.opponent_weights.keys() 作为权威的模型列表，以处理中途有模型被移除的情况
+        all_targets_met = all(
+            self.opponent_completed_games.get(path, 0) >= self.opponent_target_games.get(path, 0)
+            for path in self.opponent_weights.keys()
+        )
+
+        if all_targets_met:
+            # 3. 如果完成，则进入下一阶段并更新目标
+            self.game_phase_multiplier += 20 # 20 -> 40 -> 60 ...
+            self.opponent_target_games = {
+                path: math.ceil(weight * self.game_phase_multiplier)
+                for path, weight in self.opponent_weights.items()
+            }
+
+        # 4. 按顺序选择下一个要进行游戏的对手
+        next_opponent_path = None
+        # 迭代 self.opponent_data 以保持原始顺序
+        for item in self.opponent_data:
+            path = item['path']
+            # 防御性检查，确保新加入的模型在字典中
+            if path not in self.opponent_completed_games: self.opponent_completed_games[path] = 0
+            if path not in self.opponent_target_games: self.opponent_target_games[path] = math.ceil(item['weight'] * self.game_phase_multiplier)
+            
+            if self.opponent_completed_games.get(path, 0) < self.opponent_target_games.get(path, 0):
+                next_opponent_path = path
+                break
+        
+        # 如果找不到（例如，由于状态不一致），选择第一个作为后备
+        if next_opponent_path is None:
+            if self.opponent_data:
+                next_opponent_path = self.opponent_data[0]['path']
+            else:
+                self.active_opponent = None
+                return
+
+        # 5. 设置活跃对手
+        self.current_opponent_path = next_opponent_path
+        chosen_model_data = next((item for item in self.opponent_data if item['path'] == self.current_opponent_path), None)
+        if chosen_model_data is None:
+            raise ValueError(f"环境内错误：找不到预加载的对手模型 {self.current_opponent_path}。")
         self.active_opponent = chosen_model_data['model']
+
 
     def step(self, action_index: int) -> Tuple[dict, float, bool, bool, dict]:
         prev_threat = self._calculate_threat_potential()
@@ -216,7 +318,7 @@ class GameEnvironment(gym.Env):
         if self.scores[1] >= WINNING_SCORE: return True, False, 1
         if self.scores[-1] >= WINNING_SCORE: return True, False, -1
         if not np.any(self.action_masks(-self.current_player)): return True, False, self.current_player
-        if self.move_counter >= MAX_CONSECUTIVE_MOVES_FOR_DRAW: return True, False, 0
+        if self.move_counter >= MAX_CONSECUTUTIVE_MOVES_FOR_DRAW: return True, False, 0
         if self.total_step_counter >= MAX_STEPS_PER_EPISODE: return False, True, 0
         return False, False, None
 
@@ -235,7 +337,7 @@ class GameEnvironment(gym.Env):
         my_player, opponent_player = self.current_player, -self.current_player
         return np.concatenate([
             np.array([self.scores[my_player] / WINNING_SCORE, self.scores[opponent_player] / WINNING_SCORE,
-                      self.move_counter / MAX_CONSECUTIVE_MOVES_FOR_DRAW], dtype=np.float32),
+                      self.move_counter / MAX_CONSECUTUTIVE_MOVES_FOR_DRAW], dtype=np.float32),
             self.survival_vectors[my_player], self.survival_vectors[opponent_player]
         ])
 
