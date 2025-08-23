@@ -106,7 +106,7 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # --- 7. 评估配置 (通常固定不变) ---
 # ==============================================================================
 # 每次评估时进行的游戏局数 (必须是偶数，以进行镜像对局)
-EVALUATION_GAMES = 100
+EVALUATION_GAMES = 50
 # 挑战者胜率需要超过此阈值才能取代主宰者
 EVALUATION_THRESHOLD = 0.55
 # 评估时使用的并行环境数量 (通常为1)
@@ -119,7 +119,7 @@ EVALUATION_N_ENVS = 1
 # 是否在训练和评估初期使用固定的随机种子，以确保棋盘布局不变。
 # 这对于调试和验证模型在特定情况下的行为非常有用。
 # 在正式、长期的训练中，应将其设置为 False 以确保棋局多样性。
-USE_FIXED_SEED_FOR_TRAINING = True
+USE_FIXED_SEED_FOR_TRAINING = False
 
 # 如果 USE_FIXED_SEED_FOR_TRAINING 为 True，将使用此种子值。
 FIXED_SEED_VALUE = 42

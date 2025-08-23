@@ -28,12 +28,24 @@ class EvaluationAgent:
         )
         return int(action), None
 
-def _play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_player: EvaluationAgent, seed: int) -> int:
+def _play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_player: EvaluationAgent, seed: int, force_red_first: bool = True) -> int:
     """
     进行一局完整的游戏。
-    此函数保持不变，因为它不涉及模型加载。
+    
+    Args:
+        env: 游戏环境
+        red_player: 红方玩家（player=1）
+        black_player: 黑方玩家（player=-1）
+        seed: 随机种子
+        force_red_first: 是否强制红方先手。如果为True，会忽略环境的自动轮换逻辑
+    
+    Returns:
+        游戏结果：1表示红方胜利，-1表示黑方胜利，0表示平局
     """
-    obs, info = env.reset(seed=seed)
+    env._internal_reset(seed=seed)
+    
+    # 获取初始观察状态
+    obs = env.get_state()
     
     while True:
         current_player_agent = red_player if env.current_player == 1 else black_player

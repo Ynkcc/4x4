@@ -16,7 +16,7 @@ from utils.constants import USE_FIXED_SEED_FOR_TRAINING, FIXED_SEED_VALUE
 # ==============================================================================
 
 WINNING_SCORE = 60
-MAX_CONSECUTUTIVE_MOVES_FOR_DRAW = 24
+MAX_CONSECUTIVE_MOVES_FOR_DRAW = 24
 MAX_STEPS_PER_EPISODE = 100
 BOARD_ROWS, BOARD_COLS = 4, 4
 TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
@@ -159,6 +159,7 @@ class GameEnvironment(gym.Env):
             seed = FIXED_SEED_VALUE
         super().reset(seed=seed)
         self._initialize_board()
+        self.current_player = 1
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
         """
@@ -320,7 +321,7 @@ class GameEnvironment(gym.Env):
         if self.scores[1] >= WINNING_SCORE: return True, False, 1
         if self.scores[-1] >= WINNING_SCORE: return True, False, -1
         if not np.any(self.action_masks(-self.current_player)): return True, False, self.current_player
-        if self.move_counter >= MAX_CONSECUTUTIVE_MOVES_FOR_DRAW: return True, False, 0
+        if self.move_counter >= MAX_CONSECUTIVE_MOVES_FOR_DRAW: return True, False, 0
         if self.total_step_counter >= MAX_STEPS_PER_EPISODE: return False, True, 0
         return False, False, None
 
@@ -339,7 +340,7 @@ class GameEnvironment(gym.Env):
         my_player, opponent_player = self.current_player, -self.current_player
         return np.concatenate([
             np.array([self.scores[my_player] / WINNING_SCORE, self.scores[opponent_player] / WINNING_SCORE,
-                      self.move_counter / MAX_CONSECUTUTIVE_MOVES_FOR_DRAW], dtype=np.float32),
+                      self.move_counter / MAX_CONSECUTIVE_MOVES_FOR_DRAW], dtype=np.float32),
             self.survival_vectors[my_player], self.survival_vectors[opponent_player]
         ])
 

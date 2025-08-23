@@ -322,8 +322,8 @@ class MainWindow(QMainWindow):
         self.ai_thinking = False
         self.game_over = False
         # 【修正】reset方法返回的info中包含初始动作掩码
-        _, info = self.game.reset()
-        self.valid_action_mask = info.get('action_mask', np.zeros(ACTION_SPACE_SIZE, dtype=int))
+        self.game._internal_reset()
+        self.valid_action_mask = self.game.action_masks()
         self.update_gui()
 
         # 如果AI是红方或AI对战模式，让AI先行
