@@ -259,13 +259,13 @@ class GameEnvironment(gym.Env):
 
 
     def step(self, action_index: int) -> Tuple[dict, float, bool, bool, dict]:
-        prev_threat = self._calculate_threat_potential()
+        #prev_threat = self._calculate_threat_potential()
         move_reward, terminated, truncated, winner = self._internal_apply_action(action_index)
-        reward = self.shaping_coef * move_reward * 3 #提高move_reward的权重，该奖励比威胁收益奖励更能反映棋局变化
+        reward = self.shaping_coef * move_reward
         if terminated or truncated:
             final_reward = self._calculate_final_reward(reward, winner, terminated)
             return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
-        reward += self._calculate_shaping_reward(prev_threat)
+        #reward += self._calculate_shaping_reward(prev_threat)
         self.current_player *= -1
         if self.active_opponent:
             opp_reward, terminated, truncated, winner = self._execute_opponent_move()
@@ -405,11 +405,22 @@ class GameEnvironment(gym.Env):
             return self._internal_apply_action(np.random.choice(valid_actions))
 
     def _calculate_final_reward(self, reward: float, winner: int, term: bool) -> float:
-        if term:
-            if winner == self.learning_player_id: return reward + 1.0
-            if winner == -self.learning_player_id: return reward - 1.0
-            return reward - 1.0
-        return reward - 1.0
+        """
+        计算最终奖励，仅基于分差计算。
+        分差越大奖励越高，使用系数进行放大。
+        """
+        # 分差奖励系数，可以根据需要调整
+        score_diff_coefficient = 2.0
+        
+        # 计算学习玩家与对手的分差
+        my_score = self.scores[self.learning_player_id]
+        opponent_score = self.scores[-self.learning_player_id]
+        score_difference = my_score - opponent_score
+        
+        # 将分差标准化并乘以系数
+        normalized_score_diff = (score_difference / WINNING_SCORE) * score_diff_coefficient
+        
+        return reward + normalized_score_diff
 
     def _calculate_shaping_reward(self, prev_threat: float) -> float:
         if self.shaping_coef <= 0.0: return 0.0
