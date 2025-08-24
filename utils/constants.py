@@ -39,7 +39,7 @@ SHAPING_DECAY_END_LOOP = 50
 # --- 3. PPO 算法超参数 (主要调优目标) ---
 # ==============================================================================
 # 学习率 - 使用最佳超参数
-INITIAL_LR = 3e-4
+INITIAL_LR = 1e-4
 # PPO 裁剪范围 (Clip Range) - 使用最佳超参数
 PPO_CLIP_RANGE = 0.2
 # 每次更新前，每个环境收集的步数 - 使用最佳超参数
@@ -49,9 +49,9 @@ PPO_BATCH_SIZE = 256
 # 每次更新时，对采集到的数据进行优化的轮数 - 使用最佳超参数
 PPO_N_EPOCHS = 10
 # GAE (Generalized Advantage Estimation) 的 lambda 参数 - 使用最佳超参数
-PPO_GAE_LAMBDA = 0.9
+PPO_GAE_LAMBDA = 0.99
 # 【修改】价值函数 (Value Function) 在总损失中的系数 - 适当降低以平衡策略和价值学习，防止价值损失主导更新
-PPO_VF_COEF = 0.5
+PPO_VF_COEF = 0.6 # 增加价值函数的权重，鼓励更强的价值学习
 # 熵 (Entropy) 在总损失中的系数，鼓励探索 - 使用最佳超参数
 PPO_ENT_COEF = 0.08
 # 【修改】梯度裁剪的最大范数 - 放宽限制，允许价值函数进行更大幅度的更新以适应变化的策略
@@ -90,6 +90,14 @@ ELO_DEFAULT = 1200
 ELO_K_FACTOR = 32
 # Elo 权重温度参数，用于在选择对手时平衡Elo差异
 ELO_WEIGHT_TEMPERATURE = 100
+
+# --- 新增：对手池采样配置 ---
+# 从长期+短期池中随机选择的参训模型数量
+TRAINING_POOL_SAMPLE_SIZE = 6
+# 主宰者在最终对手池中的最小权重比例 (确保不少于51%)
+MAIN_OPPONENT_MIN_WEIGHT_RATIO = 0.51
+# 长期池模型相对于短期池模型的权重倍数 (用于加权随机采样)
+LONG_TERM_POOL_WEIGHT_MULTIPLIER = 2.0
 
 
 # ==============================================================================

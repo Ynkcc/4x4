@@ -203,14 +203,11 @@ class GameEnvironment(gym.Env):
         current_weights = {item['path']: item['weight'] for item in self.opponent_data}
         if self.opponent_weights != current_weights:
             self.opponent_weights = current_weights
+            # 重置对手完成局数
             self.opponent_completed_games = {item['path']: 0 for item in self.opponent_data}
-            
-            # --- 【错误修复】 ---
-            # 此处的 game_phase_multiplier 不应被重置。
-            # 它代表了训练的整体进度，重置它会导致训练难度循环，无法持续提升。
-            # 前期暂不移除
-            self.game_phase_multiplier = 20 # <--- 已移除此行错误代码
-            
+            # 重置游戏阶段乘数
+            self.game_phase_multiplier = 20
+            # 计算对手目标局数
             self.opponent_target_games = {
                 item['path']: math.ceil(item['weight'] * self.game_phase_multiplier)
                 for item in self.opponent_data

@@ -292,71 +292,116 @@ class SelfPlayTrainer:
 
     def _update_opponent_data(self):
         """
-        创建一个包含路径、权重和预加载模型实例的字典列表。
+        【新规则】创建一个包含路径、权重和预加载模型实例的字典列表。
+        - 从长期+短期池中加权随机采样指定数量的参训模型
+        - 长期池模型具有两倍权重
+        - 确保主宰者权重不少于51%
         """
         self.combined_opponent_data.clear()
         
-        final_pool_for_env = self.short_term_pool_paths + self.long_term_pool_paths
+        # 第一步：构建池候选者列表（使用字典推导式简化）
+        pool_candidates = [
+            {'filename': f, 'pool_type': 'short_term', 'sampling_weight': 1.0}
+            for f in self.short_term_pool_paths
+        ] + [
+            {'filename': f, 'pool_type': 'long_term', 'sampling_weight': LONG_TERM_POOL_WEIGHT_MULTIPLIER}
+            for f in self.long_term_pool_paths
+        ]
         
+        # 预先判断：检查可用模型数量
+        total_available = len(pool_candidates)
+        if total_available < TRAINING_POOL_SAMPLE_SIZE:
+            print(f"⚠️  警告：可用模型数量 ({total_available}) 少于所需采样数量 ({TRAINING_POOL_SAMPLE_SIZE})")
+            print(f"     将使用所有可用的 {total_available} 个模型进行训练")
+        
+        # 执行加权随机采样（简化版）
+        selected_pool_models = []
+        if pool_candidates:
+            sample_size = min(TRAINING_POOL_SAMPLE_SIZE, total_available)
+            
+            # 使用numpy加权采样（一行代码完成）
+            weights = np.array([c['sampling_weight'] for c in pool_candidates])
+            probs = weights / weights.sum()
+            selected_indices = np.random.choice(len(pool_candidates), size=sample_size, replace=False, p=probs)
+            selected_pool_models = [pool_candidates[i]['filename'] for i in selected_indices]
+            
+            print(f"\n--- 对手池采样结果 ---")
+            print(f"从 {total_available} 个候选者中采样了 {len(selected_pool_models)} 个模型:")
+            for i, filename in enumerate(selected_pool_models):
+                candidate = pool_candidates[selected_indices[i]]
+                pool_type_cn = "长期池" if candidate['pool_type'] == 'long_term' else "短期池"
+                print(f"  {i+1}. {filename} ({pool_type_cn})")
+        
+        # 第二步：预加载模型并计算Elo权重（使用字典推导式简化）
         main_opponent_name = os.path.basename(MAIN_OPPONENT_PATH)
         if main_opponent_name not in self.elo_ratings:
             self.elo_ratings[main_opponent_name] = self.default_elo
         main_elo = self.elo_ratings[main_opponent_name]
         
-        weights = []
-        pool_paths = [os.path.join(OPPONENT_POOL_DIR, filename) for filename in final_pool_for_env]
-        models_to_load = pool_paths + [MAIN_OPPONENT_PATH]
-
-        loaded_models = {}
-        for path in set(models_to_load):
-            try:
-                # 在CPU上加载模型,训练速度更快
-                model_instance = MaskablePPO.load(path, device="cpu")
-                loaded_models[path] = model_instance
-                
-                opp_name = os.path.basename(path)
-                opp_elo = self.elo_ratings.get(opp_name, self.default_elo)
-                elo_diff = abs(main_elo - opp_elo)
-                weight = np.exp(-elo_diff / ELO_WEIGHT_TEMPERATURE)
-                weights.append({'path': path, 'weight': weight})
-            except Exception as e:
-                raise ValueError(f"训练器错误: 预加载模型 {path} 失败: {e}。")
-
-        main_opponent_weight_factor = sum(w['weight'] for w in weights if w['path'] != MAIN_OPPONENT_PATH) * 0.3 if weights else 1.0
+        all_model_paths = [os.path.join(OPPONENT_POOL_DIR, f) for f in selected_pool_models] + [MAIN_OPPONENT_PATH]
         
-        for item in weights:
-            if item['path'] == MAIN_OPPONENT_PATH:
-                item['weight'] = main_opponent_weight_factor
-
-        total_weight = sum(item['weight'] for item in weights)
-
+        # 使用字典推导式预加载模型
+        try:
+            loaded_models = {
+                path: MaskablePPO.load(path, device="cpu") 
+                for path in set(all_model_paths)
+            }
+        except Exception as e:
+            raise ValueError(f"训练器错误: 预加载模型失败: {e}")
+        
+        # 使用lambda和列表推导式计算Elo权重
+        calculate_elo_weight = lambda path: np.exp(-abs(main_elo - self.elo_ratings.get(os.path.basename(path), self.default_elo)) / ELO_WEIGHT_TEMPERATURE)
+        pool_weights = [{'path': path, 'weight': calculate_elo_weight(path)} for path in all_model_paths]
+        
+        # 第三步：确保主宰者权重不少于MAIN_OPPONENT_MIN_WEIGHT_RATIO
+        pool_total_weight = sum(w['weight'] for w in pool_weights if w['path'] != MAIN_OPPONENT_PATH)
+        main_current_weight = next((w['weight'] for w in pool_weights if w['path'] == MAIN_OPPONENT_PATH), 0)
+        
+        # 计算主宰者应有的最小权重
+        min_main_weight = pool_total_weight * MAIN_OPPONENT_MIN_WEIGHT_RATIO / (1 - MAIN_OPPONENT_MIN_WEIGHT_RATIO)
+        
+        if main_current_weight < min_main_weight:
+            print(f">>> 主宰者权重调整: {main_current_weight:.3f} -> {min_main_weight:.3f} (确保不少于 {MAIN_OPPONENT_MIN_WEIGHT_RATIO:.1%})")
+            # 使用列表推导式更新权重
+            pool_weights = [
+                {**w, 'weight': min_main_weight} if w['path'] == MAIN_OPPONENT_PATH else w
+                for w in pool_weights
+            ]
+        
+        # 第四步：归一化权重并构建最终数据结构（使用列表推导式）
+        total_weight = sum(w['weight'] for w in pool_weights)
+        
         if total_weight > 0:
-            for item in weights:
-                item['weight'] /= total_weight
-                self.combined_opponent_data.append({
-                    'path': item['path'],
-                    'weight': item['weight'],
-                    'model': loaded_models[item['path']]
-                })
+            self.combined_opponent_data = [
+                {
+                    'path': w['path'],
+                    'weight': w['weight'] / total_weight,
+                    'model': loaded_models[w['path']]
+                }
+                for w in pool_weights
+            ]
         else:
-            num_opps = len(models_to_load)
-            for path in models_to_load:
-                self.combined_opponent_data.append({
-                    'path': path,
-                    'weight': 1.0 / num_opps if num_opps > 0 else 0.0,
-                    'model': loaded_models[path]
-                })
+            # 备用方案：平均分配权重
+            uniform_weight = 1.0 / len(all_model_paths) if all_model_paths else 0.0
+            self.combined_opponent_data = [
+                {'path': path, 'weight': uniform_weight, 'model': loaded_models[path]}
+                for path in all_model_paths
+            ]
 
+        # 打印池状态和权重分布
         print("\n--- 对手池状态 ---")
         print(f"短期池 ({len(self.short_term_pool_paths)}/{SHORT_TERM_POOL_SIZE}): {self.short_term_pool_paths}")
         print(f"长期池 ({len(self.long_term_pool_paths)}/{LONG_TERM_POOL_SIZE}): {self.long_term_pool_paths}")
         print(f"长期池代数差值指数: {self.long_term_power_of_2} (当前要求差值: {2**self.long_term_power_of_2})")
         
-        print("\n对手池采样权重已更新:")
-        sorted_opponent_data = sorted(self.combined_opponent_data, key=lambda x: os.path.basename(x['path']))
-        for item in sorted_opponent_data:
-            elo = self.elo_ratings.get(os.path.basename(item['path']), self.default_elo)
-            print(f"  - {os.path.basename(item['path']):<25} (Elo: {elo:.0f}, 权重: {item['weight']:.2%})")
+        print(f"\n对手池最终权重分布 (参训模型: {len(selected_pool_models)}, 总模型: {len(self.combined_opponent_data)}):")
+        # 使用lambda表达式排序
+        sorted_data = sorted(self.combined_opponent_data, key=lambda x: os.path.basename(x['path']))
+        for item in sorted_data:
+            name = os.path.basename(item['path'])
+            elo = self.elo_ratings.get(name, self.default_elo)
+            is_main = "★主宰者" if item['path'] == MAIN_OPPONENT_PATH else ""
+            print(f"  - {name:<25} (Elo: {elo:.0f}, 权重: {item['weight']:.2%}) {is_main}")
 
     def _prepare_environment_and_models(self):
         """准备用于训练的模型和环境。"""
