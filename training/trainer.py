@@ -22,6 +22,17 @@ def create_new_ppo_model(env=None, tensorboard_log=None):
     """
     创建一个全新的随机初始化的PPO模型。
     """
+    # 【V6 优化】为解耦的网络结构推荐新的网络架构
+    # CustomActorCriticPolicy 内部的 CustomNetwork 输出维度为 num_hidden_channels
+    input_dim = NETWORK_NUM_HIDDEN_CHANNELS # e.g. 128
+
+    # 推荐方案: 强化价值网络
+    # 价值网络(vf)比策略网络(pi)更深更宽，以增强其对复杂状态价值的拟合能力。
+    policy_net_arch = dict(
+        pi=[input_dim, input_dim // 2],          # 策略头: [128, 64] - 相对简洁，专注决策
+        vf=[input_dim * 2, input_dim, input_dim // 2] # 价值头: [256, 128, 64] - 更深更宽，专注评估
+    )
+
     model = MaskablePPO(
         policy=CustomActorCriticPolicy,
         env=env,
@@ -38,11 +49,9 @@ def create_new_ppo_model(env=None, tensorboard_log=None):
         device=PPO_DEVICE,
         verbose=PPO_VERBOSE,
         policy_kwargs={
-            'features_extractor_kwargs': {
-                'features_dim': NETWORK_FEATURES_DIM,
-                'num_res_blocks': NETWORK_NUM_RES_BLOCKS,
-                'num_hidden_channels': NETWORK_NUM_HIDDEN_CHANNELS
-            }
+            # CustomActorCriticPolicy 会自动使用 CustomNetwork 作为特征提取器。
+            # 这里仅需传递 MLP 头的网络结构。
+            "net_arch": policy_net_arch,
         }
     )
     return model
@@ -51,6 +60,13 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
     """
     加载PPO模型并应用自定义超参数。
     """
+    # 【V6 优化】为解耦的网络结构推荐新的网络架构
+    input_dim = NETWORK_NUM_HIDDEN_CHANNELS
+    policy_net_arch = dict(
+        pi=[input_dim, input_dim // 2],
+        vf=[input_dim * 2, input_dim, input_dim // 2]
+    )
+
     model = MaskablePPO.load(
         model_path,
         env=env,
@@ -58,8 +74,17 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
         clip_range=PPO_CLIP_RANGE,
         tensorboard_log=tensorboard_log,
         n_steps=PPO_N_STEPS,
-        device=PPO_DEVICE
+        device=PPO_DEVICE,
+        # 【重要修复】加载模型时必须传递 policy_kwargs 和 custom_objects，
+        # 否则网络结构会恢复为默认值！
+        custom_objects={
+            "policy_class": CustomActorCriticPolicy
+        },
+        policy_kwargs={
+            "net_arch": policy_net_arch,
+        }
     )
+    # 重新应用超参数
     model.batch_size = PPO_BATCH_SIZE
     model.n_epochs = PPO_N_EPOCHS
     model.gae_lambda = PPO_GAE_LAMBDA
@@ -84,7 +109,6 @@ class SelfPlayTrainer:
         self.long_term_pool_paths = []
         self.short_term_pool_paths = []
         self.long_term_power_of_2 = 1 # 记录长期模型中2的指数，初始为1
-        # 【修改】现在只用一个字典来存储所有对手数据
         self.combined_opponent_data: List[Dict[str, Any]] = []
 
         # --- Elo与模型管理 ---
@@ -162,7 +186,6 @@ class SelfPlayTrainer:
                     self.elo_ratings = data.get("elo", {})
                     self.model_generations = data.get("generations", {})
                     self.latest_generation = data.get("latest_generation", 0)
-                    # 加载新的模型池属性
                     self.long_term_pool_paths = data.get("long_term_pool_paths", [])
                     self.short_term_pool_paths = data.get("short_term_pool_paths", [])
                     self.long_term_power_of_2 = data.get("long_term_power_of_2", 1)
@@ -182,7 +205,6 @@ class SelfPlayTrainer:
             "elo": self.elo_ratings,
             "generations": self.model_generations,
             "latest_generation": self.latest_generation,
-            # 保存新的模型池属性
             "long_term_pool_paths": self.long_term_pool_paths,
             "short_term_pool_paths": self.short_term_pool_paths,
             "long_term_power_of_2": self.long_term_power_of_2,
@@ -197,7 +219,6 @@ class SelfPlayTrainer:
         """
         【V7 新规则】管理长期和短期对手池。
         """
-        # 1. 如果有新模型产生，处理它的入池逻辑
         if new_opponent_path:
             self.latest_generation += 1
             new_opponent_name = os.path.basename(new_opponent_path)
@@ -205,7 +226,6 @@ class SelfPlayTrainer:
             
             added_to_long_term = False
             
-            # 总是按代数对长期池进行排序，以确保逻辑正确
             long_term_pool_with_gens = sorted(
                 [(p, self.model_generations.get(p, 0)) for p in self.long_term_pool_paths],
                 key=lambda x: x[1]
@@ -213,8 +233,6 @@ class SelfPlayTrainer:
             self.long_term_pool_paths = [p for p, _ in long_term_pool_with_gens]
             long_term_gens = [g for _, g in long_term_pool_with_gens]
 
-            # --- 应用新的长期池规则 ---
-            # 规则1: 长期池为空，直接加入
             if not self.long_term_pool_paths:
                 print(f"长期池为空，新模型 {new_opponent_name} 直接加入。")
                 self.long_term_pool_paths.append(new_opponent_name)
@@ -223,17 +241,14 @@ class SelfPlayTrainer:
                 required_gap = 2 ** self.long_term_power_of_2
                 actual_gap = self.latest_generation - long_term_gens[-1]
 
-                # 检查新模型是否满足当前的代数差值要求
                 if actual_gap == required_gap:
-                    # 规则3: 长期池已满，触发更新
                     if len(self.long_term_pool_paths) >= LONG_TERM_POOL_SIZE:
                         print(f"长期池已满且满足差值 {required_gap}，触发指数更新。")
                         self.long_term_power_of_2 += 1
                         new_required_gap = 2 ** self.long_term_power_of_2
                         print(f"2的指数提升至 {self.long_term_power_of_2} (新差值为 {new_required_gap})。")
                         
-                        # 根据新差值重建长期池
-                        retained_pool = [self.long_term_pool_paths[0]] # 始终保留最老的模型
+                        retained_pool = [self.long_term_pool_paths[0]]
                         last_kept_gen = long_term_gens[0]
                         
                         for i in range(1, len(long_term_gens)):
@@ -244,34 +259,25 @@ class SelfPlayTrainer:
                         self.long_term_pool_paths = retained_pool
                         print(f"长期池更新后保留 {len(self.long_term_pool_paths)} 个模型。")
                         
-                        # 更新后，再次检查新模型是否能加入
                         new_last_gen = self.model_generations.get(self.long_term_pool_paths[-1], 0)
                         if len(self.long_term_pool_paths) < LONG_TERM_POOL_SIZE and (self.latest_generation - new_last_gen) == new_required_gap:
                             self.long_term_pool_paths.append(new_opponent_name)
                             added_to_long_term = True
                             print(f"新模型 {new_opponent_name} 在更新后成功加入长期池。")
-
-                    # 规则2: 长期池未满，直接加入
                     else:
                         self.long_term_pool_paths.append(new_opponent_name)
                         added_to_long_term = True
                         print(f"长期池未满，新模型 {new_opponent_name} 成功加入。")
 
-            # --- 如果无法加入长期池，则尝试加入短期池 ---
             if not added_to_long_term:
                 self.short_term_pool_paths.append(new_opponent_name)
-                
-                # 按代数降序排序短期池
                 self.short_term_pool_paths.sort(
                     key=lambda p: self.model_generations.get(p, 0),
                     reverse=True
                 )
-                
-                # 如果短期池超员，移除最旧的
                 if len(self.short_term_pool_paths) > SHORT_TERM_POOL_SIZE:
                     self.short_term_pool_paths = self.short_term_pool_paths[:SHORT_TERM_POOL_SIZE]
         
-        # 2. 清理阶段：移除所有不在池中的模型文件
         current_pool_names = set(self.short_term_pool_paths + self.long_term_pool_paths)
         
         for filename in os.listdir(OPPONENT_POOL_DIR):
@@ -284,10 +290,9 @@ class SelfPlayTrainer:
         self._save_elo_and_generations()
         self._update_opponent_data()
 
-
     def _update_opponent_data(self):
         """
-        【修改】现在创建一个包含路径、权重和预加载模型实例的字典列表。
+        创建一个包含路径、权重和预加载模型实例的字典列表。
         """
         self.combined_opponent_data.clear()
         
@@ -299,15 +304,14 @@ class SelfPlayTrainer:
         main_elo = self.elo_ratings[main_opponent_name]
         
         weights = []
-        # 【修改】将池中的文件名转换为完整路径
         pool_paths = [os.path.join(OPPONENT_POOL_DIR, filename) for filename in final_pool_for_env]
         models_to_load = pool_paths + [MAIN_OPPONENT_PATH]
 
-        # 1. 加载所有模型并计算权重
         loaded_models = {}
         for path in set(models_to_load):
             try:
-                model_instance = MaskablePPO.load(path, device='cpu')
+                # 在CPU上加载模型,训练速度更快
+                model_instance = MaskablePPO.load(path, device="cpu")
                 loaded_models[path] = model_instance
                 
                 opp_name = os.path.basename(path)
@@ -318,7 +322,6 @@ class SelfPlayTrainer:
             except Exception as e:
                 raise ValueError(f"训练器错误: 预加载模型 {path} 失败: {e}。")
 
-        # 2. 将主宰者权重特殊处理
         main_opponent_weight_factor = sum(w['weight'] for w in weights if w['path'] != MAIN_OPPONENT_PATH) * 0.3 if weights else 1.0
         
         for item in weights:
@@ -327,7 +330,6 @@ class SelfPlayTrainer:
 
         total_weight = sum(item['weight'] for item in weights)
 
-        # 3. 归一化权重并组合数据
         if total_weight > 0:
             for item in weights:
                 item['weight'] /= total_weight
@@ -345,19 +347,16 @@ class SelfPlayTrainer:
                     'model': loaded_models[path]
                 })
 
-        # 打印状态
         print("\n--- 对手池状态 ---")
         print(f"短期池 ({len(self.short_term_pool_paths)}/{SHORT_TERM_POOL_SIZE}): {self.short_term_pool_paths}")
         print(f"长期池 ({len(self.long_term_pool_paths)}/{LONG_TERM_POOL_SIZE}): {self.long_term_pool_paths}")
         print(f"长期池代数差值指数: {self.long_term_power_of_2} (当前要求差值: {2**self.long_term_power_of_2})")
         
         print("\n对手池采样权重已更新:")
-        # 排序以获得更稳定的输出
         sorted_opponent_data = sorted(self.combined_opponent_data, key=lambda x: os.path.basename(x['path']))
         for item in sorted_opponent_data:
             elo = self.elo_ratings.get(os.path.basename(item['path']), self.default_elo)
             print(f"  - {os.path.basename(item['path']):<25} (Elo: {elo:.0f}, 权重: {item['weight']:.2%})")
-
 
     def _prepare_environment_and_models(self):
         """准备用于训练的模型和环境。"""
@@ -371,7 +370,6 @@ class SelfPlayTrainer:
         self.env = make_vec_env(
             GameEnvironment, n_envs=N_ENVS, vec_env_cls=vec_env_cls,
             env_kwargs={
-                # 【修改】现在只传递一个参数
                 'opponent_data': self.combined_opponent_data,
                 'shaping_coef': SHAPING_COEF_INITIAL 
             }
@@ -428,7 +426,6 @@ class SelfPlayTrainer:
         if win_rate > EVALUATION_THRESHOLD:
             print(f"🏆 挑战成功 (胜率 {win_rate:.2%} > {EVALUATION_THRESHOLD:.2%})！新主宰者诞生！")
             
-            # 使用最新代数来命名旧的主宰者
             old_main_gen = self.latest_generation + 1
             new_opponent_name = f"opponent_{old_main_gen}.zip"
             new_opponent_path = os.path.join(OPPONENT_POOL_DIR, new_opponent_name)
@@ -441,11 +438,9 @@ class SelfPlayTrainer:
             self.elo_ratings[main_opponent_name] = self.elo_ratings[challenger_name]
             print(f"挑战者已成为新主宰者！")
 
-            # 在这里，new_opponent_path是刚刚退役的主宰者，送入池中进行管理
             self._manage_opponent_pool(new_opponent_path=new_opponent_path)
             
             print(f"🔥 发送指令，在所有 {N_ENVS} 个并行环境中更新对手池...")
-            # 【修改】现在传递的是一个参数
             self.env.env_method("reload_opponent_pool", new_opponent_data=self.combined_opponent_data)
             print("✅ 所有环境中的对手池均已成功更新！")
             

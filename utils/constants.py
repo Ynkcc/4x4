@@ -1,6 +1,7 @@
 # utils/constants.py
 
 import os
+import torch
 
 # ==============================================================================
 # --- 1. 路径与目录配置 (通常固定不变) ---
@@ -38,27 +39,27 @@ SHAPING_DECAY_END_LOOP = 50
 # --- 3. PPO 算法超参数 (主要调优目标) ---
 # ==============================================================================
 # 学习率 - 使用最佳超参数
-INITIAL_LR = 0.0006220186927724994
+INITIAL_LR = 3e-4
 # PPO 裁剪范围 (Clip Range) - 使用最佳超参数
-PPO_CLIP_RANGE = 0.1
+PPO_CLIP_RANGE = 0.2
 # 每次更新前，每个环境收集的步数 - 使用最佳超参数
 PPO_N_STEPS = 512
 # 训练时每个 mini-batch 的大小 - 使用最佳超参数
 PPO_BATCH_SIZE = 256
 # 每次更新时，对采集到的数据进行优化的轮数 - 使用最佳超参数
-PPO_N_EPOCHS = 19
+PPO_N_EPOCHS = 10
 # GAE (Generalized Advantage Estimation) 的 lambda 参数 - 使用最佳超参数
-PPO_GAE_LAMBDA = 0.9503412250421609
-# 价值函数 (Value Function) 在总损失中的系数 - 使用最佳超参数
-PPO_VF_COEF = 0.4083575932237434
+PPO_GAE_LAMBDA = 0.9
+# 【修改】价值函数 (Value Function) 在总损失中的系数 - 适当降低以平衡策略和价值学习，防止价值损失主导更新
+PPO_VF_COEF = 0.5
 # 熵 (Entropy) 在总损失中的系数，鼓励探索 - 使用最佳超参数
-PPO_ENT_COEF = 0.05
-# 梯度裁剪的最大范数，防止梯度爆炸
-PPO_MAX_GRAD_NORM = 0.2
+PPO_ENT_COEF = 0.08
+# 【修改】梯度裁剪的最大范数 - 放宽限制，允许价值函数进行更大幅度的更新以适应变化的策略
+PPO_MAX_GRAD_NORM = 0.5
 # PPO模型训练时使用的设备 ('auto', 'cpu', 'cuda')
-PPO_DEVICE = 'auto'
+PPO_DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # 训练过程的日志详细程度 (0=无, 1=信息, 2=调试)
-PPO_VERBOSE = 1
+PPO_VERBOSE = 2
 # 是否在训练时显示进度条
 PPO_SHOW_PROGRESS = True
 
@@ -71,7 +72,7 @@ NETWORK_FEATURES_DIM = 256
 # CNN中的残差块数量 - 使用最佳超参数
 NETWORK_NUM_RES_BLOCKS = 5
 # CNN中的隐藏层通道数 - 使用最佳超参数
-NETWORK_NUM_HIDDEN_CHANNELS = 64
+NETWORK_NUM_HIDDEN_CHANNELS = 128
 
 
 # ==============================================================================
@@ -108,7 +109,7 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # 每次评估时进行的游戏局数 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 50
 # 挑战者胜率需要超过此阈值才能取代主宰者
-EVALUATION_THRESHOLD = 0.55
+EVALUATION_THRESHOLD = 0.7
 # 评估时使用的并行环境数量 (通常为1)
 EVALUATION_N_ENVS = 1
 

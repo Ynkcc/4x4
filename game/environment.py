@@ -409,9 +409,9 @@ class GameEnvironment(gym.Env):
     def _calculate_final_reward(self, reward: float, winner: int, term: bool) -> float:
         if term:
             if winner == self.learning_player_id: return reward + 1.0
-            if winner == -self.learning_player_id: return reward - 0.8
-            return reward - 0.1
-        return reward - 0.5
+            if winner == -self.learning_player_id: return reward - 1.0
+            return reward - 1.0
+        return reward - 1.0
 
     def _calculate_shaping_reward(self, prev_threat: float) -> float:
         if self.shaping_coef <= 0.0: return 0.0
