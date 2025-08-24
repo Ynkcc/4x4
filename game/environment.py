@@ -21,6 +21,7 @@ MAX_STEPS_PER_EPISODE = 100
 BOARD_ROWS, BOARD_COLS = 4, 4
 TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
 NUM_PIECE_TYPES = 7
+INITIAL_REVEALED_PIECES = 2  # 游戏开局时随机翻开的棋子数量
 
 class PieceType(Enum):
     SOLDIER = 0
@@ -260,7 +261,7 @@ class GameEnvironment(gym.Env):
     def step(self, action_index: int) -> Tuple[dict, float, bool, bool, dict]:
         prev_threat = self._calculate_threat_potential()
         move_reward, terminated, truncated, winner = self._internal_apply_action(action_index)
-        reward = self.shaping_coef * move_reward
+        reward = self.shaping_coef * move_reward * 3 #提高move_reward的权重，该奖励比威胁收益奖励更能反映棋局变化
         if terminated or truncated:
             final_reward = self._calculate_final_reward(reward, winner, terminated)
             return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
@@ -508,6 +509,19 @@ class GameEnvironment(gym.Env):
             self.board[sq] = piece
             self.empty_vector[sq] = False
             self.hidden_vector[sq] = True
+        
+        # --- 【新增】游戏开局后随机翻开棋子 ---
+        # 根据 INITIAL_REVEALED_PIECES 常量控制翻开的棋子数量
+        if INITIAL_REVEALED_PIECES > 0:
+            # 确保翻开数量不超过棋盘总位置数
+            reveal_count = min(INITIAL_REVEALED_PIECES, TOTAL_POSITIONS)
+            positions_to_reveal = rng.choice(TOTAL_POSITIONS, size=reveal_count, replace=False)
+            for sq in positions_to_reveal:
+                piece = self.board[sq]
+                piece.revealed = True
+                self.hidden_vector[sq] = False
+                self.revealed_vectors[piece.player][sq] = True
+                self.piece_vectors[piece.player][piece.piece_type.value][sq] = True
 
     def apply_single_action(self, action_index):
         return self._internal_apply_action(action_index)

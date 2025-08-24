@@ -30,7 +30,7 @@ TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_fin
 # 奖励塑形(Reward Shaping)系数的初始值，用于引导模型学习
 SHAPING_COEF_INITIAL = 0.001
 # 奖励塑形系数衰减后的最终值
-SHAPING_COEF_FINAL = 0.000001
+SHAPING_COEF_FINAL = 0
 # 奖励塑形系数衰减完成所需的训练循环次数
 SHAPING_DECAY_END_LOOP = 50
 
@@ -38,21 +38,21 @@ SHAPING_DECAY_END_LOOP = 50
 # ==============================================================================
 # --- 3. PPO 算法超参数 (主要调优目标) ---
 # ==============================================================================
-# 学习率 - 使用最佳超参数
+# 学习率
 INITIAL_LR = 1e-4
-# PPO 裁剪范围 (Clip Range) - 使用最佳超参数
+# PPO 裁剪范围 (Clip Range)
 PPO_CLIP_RANGE = 0.2
-# 每次更新前，每个环境收集的步数 - 使用最佳超参数
+# 每次更新前，每个环境收集的步数
 PPO_N_STEPS = 512
-# 训练时每个 mini-batch 的大小 - 使用最佳超参数
+# 训练时每个 mini-batch 的大小
 PPO_BATCH_SIZE = 256
-# 每次更新时，对采集到的数据进行优化的轮数 - 使用最佳超参数
-PPO_N_EPOCHS = 10
-# GAE (Generalized Advantage Estimation) 的 lambda 参数 - 使用最佳超参数
+# 每次更新时，对采集到的数据进行优化的轮数
+PPO_N_EPOCHS = 4
+# GAE (Generalized Advantage Estimation) 的 lambda 参数
 PPO_GAE_LAMBDA = 0.99
 # 【修改】价值函数 (Value Function) 在总损失中的系数 - 适当降低以平衡策略和价值学习，防止价值损失主导更新
 PPO_VF_COEF = 0.6 # 增加价值函数的权重，鼓励更强的价值学习
-# 熵 (Entropy) 在总损失中的系数，鼓励探索 - 使用最佳超参数
+# 熵 (Entropy) 在总损失中的系数，鼓励探索
 PPO_ENT_COEF = 0.08
 # 【修改】梯度裁剪的最大范数 - 放宽限制，允许价值函数进行更大幅度的更新以适应变化的策略
 PPO_MAX_GRAD_NORM = 0.5
@@ -67,11 +67,11 @@ PPO_SHOW_PROGRESS = True
 # ==============================================================================
 # --- 4. 神经网络架构超参数 (主要调优目标) ---
 # ==============================================================================
-# 特征提取器最终输出的特征维度 - 使用最佳超参数
+# 特征提取器最终输出的特征维度
 NETWORK_FEATURES_DIM = 256
-# CNN中的残差块数量 - 使用最佳超参数
+# CNN中的残差块数量
 NETWORK_NUM_RES_BLOCKS = 5
-# CNN中的隐藏层通道数 - 使用最佳超参数
+# CNN中的隐藏层通道数
 NETWORK_NUM_HIDDEN_CHANNELS = 128
 
 
@@ -117,7 +117,7 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # 每次评估时进行的游戏局数 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 50
 # 挑战者胜率需要超过此阈值才能取代主宰者
-EVALUATION_THRESHOLD = 0.7
+EVALUATION_THRESHOLD = 0.51
 # 评估时使用的并行环境数量 (通常为1)
 EVALUATION_N_ENVS = 1
 
