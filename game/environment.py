@@ -259,9 +259,10 @@ class GameEnvironment(gym.Env):
 
 
     def step(self, action_index: int) -> Tuple[dict, float, bool, bool, dict]:
+        reward = 0.0
         #prev_threat = self._calculate_threat_potential()
         move_reward, terminated, truncated, winner = self._internal_apply_action(action_index)
-        reward = self.shaping_coef * move_reward
+        #reward = self.shaping_coef * move_reward
         if terminated or truncated:
             final_reward = self._calculate_final_reward(reward, winner, terminated)
             return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
@@ -269,7 +270,7 @@ class GameEnvironment(gym.Env):
         self.current_player *= -1
         if self.active_opponent:
             opp_reward, terminated, truncated, winner = self._execute_opponent_move()
-            reward -= self.shaping_coef * opp_reward
+            #reward -= self.shaping_coef * opp_reward
             if terminated or truncated:
                 final_reward = self._calculate_final_reward(reward, winner, terminated)
                 return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
