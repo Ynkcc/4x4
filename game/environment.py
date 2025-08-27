@@ -21,7 +21,7 @@ MAX_STEPS_PER_EPISODE = 100
 BOARD_ROWS, BOARD_COLS = 4, 4
 TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
 NUM_PIECE_TYPES = 7
-INITIAL_REVEALED_PIECES = 2  # 游戏开局时随机翻开的棋子数量
+INITIAL_REVEALED_PIECES = 16  # 游戏开局时随机翻开的棋子数量
 
 class PieceType(Enum):
     SOLDIER = 0
@@ -406,22 +406,11 @@ class GameEnvironment(gym.Env):
             return self._internal_apply_action(np.random.choice(valid_actions))
 
     def _calculate_final_reward(self, reward: float, winner: int, term: bool) -> float:
-        """
-        计算最终奖励，仅基于分差计算。
-        分差越大奖励越高，使用系数进行放大。
-        """
-        # 分差奖励系数，可以根据需要调整
-        score_diff_coefficient = 2.0
-        
-        # 计算学习玩家与对手的分差
-        my_score = self.scores[self.learning_player_id]
-        opponent_score = self.scores[-self.learning_player_id]
-        score_difference = my_score - opponent_score
-        
-        # 将分差标准化并乘以系数
-        normalized_score_diff = (score_difference / WINNING_SCORE) * score_diff_coefficient
-        
-        return reward + normalized_score_diff
+        if term:
+            if winner == self.learning_player_id: return reward + 1.0
+            if winner == -self.learning_player_id: return reward - 1.0
+            return reward
+        return reward - 1.0
 
     def _calculate_shaping_reward(self, prev_threat: float) -> float:
         if self.shaping_coef <= 0.0: return 0.0
