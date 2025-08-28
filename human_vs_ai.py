@@ -558,13 +558,14 @@ class MainWindow(QMainWindow):
 
     def update_board_display(self):
         """更新棋盘显示 (已优化高亮逻辑)。"""
+        # 【修改】移除 HORSE 和 CHARIOT
         red_map = {
             PieceType.GENERAL: "帥", PieceType.ADVISOR: "仕", PieceType.ELEPHANT: "相",
-            PieceType.CHARIOT: "俥", PieceType.HORSE: "傌", PieceType.CANNON: "炮", PieceType.SOLDIER: "兵"
+            PieceType.CANNON: "炮", PieceType.SOLDIER: "兵"
         }
         black_map = {
             PieceType.GENERAL: "將", PieceType.ADVISOR: "士", PieceType.ELEPHANT: "象",
-            PieceType.CHARIOT: "車", PieceType.HORSE: "馬", PieceType.CANNON: "炮", PieceType.SOLDIER: "卒"
+            PieceType.CANNON: "炮", PieceType.SOLDIER: "卒"
         }
 
         # 计算高亮目标

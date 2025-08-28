@@ -21,29 +21,42 @@ MAX_CONSECUTIVE_MOVES_FOR_DRAW = 24
 MAX_STEPS_PER_EPISODE = 100
 BOARD_ROWS, BOARD_COLS = 4, 4
 TOTAL_POSITIONS = BOARD_ROWS * BOARD_COLS
-NUM_PIECE_TYPES = 7
+NUM_PIECE_TYPES = 5  # 【修改】棋子类型从7种减少到5种
 INITIAL_REVEALED_PIECES = 16  # 游戏开局时随机翻开的棋子数量
 
 class PieceType(Enum):
+    # 【修改】移除了 HORSE 和 CHARIOT，并重新编号
     SOLDIER = 0
     CANNON = 1
-    HORSE = 2
-    CHARIOT = 3
-    ELEPHANT = 4
-    ADVISOR = 5
-    GENERAL = 6
+    ELEPHANT = 2
+    ADVISOR = 3
+    GENERAL = 4
 
-PIECE_VALUES = {pt: val for pt, val in zip(PieceType, [4, 10, 10, 10, 10, 20, 30])}
-PIECE_MAX_COUNTS = {pt: val for pt, val in zip(PieceType, [2, 1, 1, 1, 1, 1, 1])}
+# 【修改】移除了 HORSE 和 CHARIOT
+PIECE_VALUES = {
+    PieceType.SOLDIER: 4,
+    PieceType.CANNON: 10,
+    PieceType.ELEPHANT: 10,
+    PieceType.ADVISOR: 10,
+    PieceType.GENERAL: 30
+}
 
+# 【修改】更新了棋子数量
+PIECE_MAX_COUNTS = {
+    PieceType.SOLDIER: 3,
+    PieceType.CANNON: 1,
+    PieceType.ELEPHANT: 1,
+    PieceType.ADVISOR: 2,
+    PieceType.GENERAL: 1
+}
+
+# 【修改】根据新的棋子数量和类型重新定义生存向量
 PIECE_SURVIVAL_VEC_INFO = {
-    PieceType.SOLDIER:  {'start_idx': 0, 'count': 2},
-    PieceType.CANNON:   {'start_idx': 2, 'count': 1},
-    PieceType.HORSE:    {'start_idx': 3, 'count': 1},
-    PieceType.CHARIOT:  {'start_idx': 4, 'count': 1},
-    PieceType.ELEPHANT: {'start_idx': 5, 'count': 1},
-    PieceType.ADVISOR:  {'start_idx': 6, 'count': 1},
-    PieceType.GENERAL:  {'start_idx': 7, 'count': 1},
+    PieceType.SOLDIER:  {'start_idx': 0, 'count': 3}, # 3个兵
+    PieceType.CANNON:   {'start_idx': 3, 'count': 1}, # 1个炮
+    PieceType.ELEPHANT: {'start_idx': 4, 'count': 1}, # 1个象
+    PieceType.ADVISOR:  {'start_idx': 5, 'count': 2}, # 2个士
+    PieceType.GENERAL:  {'start_idx': 7, 'count': 1}, # 1个将
 }
 
 REVEAL_ACTIONS_COUNT = 16
