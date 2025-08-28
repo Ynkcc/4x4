@@ -39,7 +39,7 @@ SHAPING_DECAY_END_LOOP = 0
 # --- 3. PPO 算法超参数 (主要调优目标) ---
 # ==============================================================================
 # 学习率
-INITIAL_LR = 5e-5
+INITIAL_LR = 1e-4
 # PPO 裁剪范围 (Clip Range)
 PPO_CLIP_RANGE = 0.2
 # 每次更新前，每个环境收集的步数
@@ -49,7 +49,7 @@ PPO_BATCH_SIZE = 512
 # 每次更新时，对采集到的数据进行优化的轮数
 PPO_N_EPOCHS = 20
 # GAE (Generalized Advantage Estimation) 的 lambda 参数
-PPO_GAE_LAMBDA = 0.999
+PPO_GAE_LAMBDA = 0.9
 # 【修改】价值函数 (Value Function) 在总损失中的系数 - 适当降低以平衡策略和价值学习，防止价值损失主导更新
 PPO_VF_COEF = 0.6 # 增加价值函数的权重，鼓励更强的价值学习
 # 熵 (Entropy) 在总损失中的系数，鼓励探索
@@ -119,7 +119,7 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # 每次评估时进行的游戏局数 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 50
 # 挑战者胜率需要超过此阈值才能取代主宰者
-EVALUATION_THRESHOLD = 0.51
+EVALUATION_THRESHOLD = 0.7
 # 评估时使用的并行环境数量 (通常为1)
 EVALUATION_N_ENVS = 1
 
@@ -134,3 +134,12 @@ USE_FIXED_SEED_FOR_TRAINING = False
 
 # 如果 USE_FIXED_SEED_FOR_TRAINING 为 True，将使用此种子值。
 FIXED_SEED_VALUE = 42
+
+
+# ==============================================================================
+# --- 9. 状态堆叠配置 (新增) ---
+# ==============================================================================
+# 定义要堆叠的历史状态帧数。
+# 设置为 1 表示不使用状态堆叠。
+# 推荐值为 2 或 4，可以捕捉到基本的动作轨迹。
+STATE_STACK_SIZE = 5

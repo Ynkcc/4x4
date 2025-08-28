@@ -7,9 +7,10 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Any, List, Dict, Tuple
 import math
+from collections import deque
 
-# --- 【新增】导入调试常量 ---
-from utils.constants import USE_FIXED_SEED_FOR_TRAINING, FIXED_SEED_VALUE
+# --- 【新增】导入调试和状态堆叠常量 ---
+from utils.constants import USE_FIXED_SEED_FOR_TRAINING, FIXED_SEED_VALUE, STATE_STACK_SIZE
 
 # ==============================================================================
 # --- 游戏常量与类型定义 ---
@@ -78,6 +79,7 @@ class Piece:
 class GameEnvironment(gym.Env):
     """
     暗棋游戏环境，兼容Gymnasium接口，并为自我对弈训练进行了优化。
+    【V9 更新】: 实现了状态堆叠 (State Stacking) 功能。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
@@ -92,6 +94,13 @@ class GameEnvironment(gym.Env):
         self.learning_player_id = 1
         self.opponent_data = opponent_data if opponent_data else []
         self.active_opponent = opponent_agent
+        
+        # --- 【V9 修改】状态堆叠核心 ---
+        self.stack_size = STATE_STACK_SIZE
+        # 使用deque可以自动管理历史记录的长度
+        self.board_history = deque([], maxlen=self.stack_size)
+        self.scalar_history = deque([], maxlen=self.stack_size)
+        
         self._initialize_spaces()
         self.board: np.ndarray = np.empty(TOTAL_POSITIONS, dtype=object)
         self.piece_vectors: Dict[int, List[np.ndarray]] = {}
@@ -109,10 +118,8 @@ class GameEnvironment(gym.Env):
         self.coords_to_action: Dict[Any, int] = {}
         self._first_player_alternator: int = 1
         
-        # 【V8 新增】用于追踪上一步动作
         self.last_action: int = -1 
         
-        # --- 用于持久化对手选择逻辑的状态 ---
         self.opponent_weights: Dict[str, float] = {}
         self.opponent_target_games: Dict[str, int] = {}
         self.opponent_completed_games: Dict[str, int] = {}
@@ -122,16 +129,18 @@ class GameEnvironment(gym.Env):
         self._initialize_lookup_tables()
 
     def _initialize_spaces(self):
-        num_channels = NUM_PIECE_TYPES * 2 + 2
-        board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
+        """【V9 修改】根据堆叠大小定义观察空间"""
+        # 原始单帧的维度
+        num_channels_single = NUM_PIECE_TYPES * 2 + 2
+        scalar_shape_single = (3 + 8 + 8 + 1 + ACTION_SPACE_SIZE,)
         
-        # 【V8 修改】为标量向量增加 last_action (独热编码) 和 total_steps
-        # 3 (scores, move_counter) + 8 (my_surv) + 8 (opp_surv) + 1 (total_steps) + ACTION_SPACE_SIZE (last_action one-hot)
-        scalar_shape = (3 + 8 + 8 + 1 + ACTION_SPACE_SIZE,)
+        # 堆叠后的维度
+        board_shape_stacked = (num_channels_single * self.stack_size, BOARD_ROWS, BOARD_COLS)
+        scalar_shape_stacked = (scalar_shape_single[0] * self.stack_size,)
         
         self.observation_space = spaces.Dict({
-            "board": spaces.Box(low=0.0, high=1.0, shape=board_shape, dtype=np.float32),
-            "scalars": spaces.Box(low=0.0, high=1.0, shape=scalar_shape, dtype=np.float32)
+            "board": spaces.Box(low=0.0, high=1.0, shape=board_shape_stacked, dtype=np.float32),
+            "scalars": spaces.Box(low=0.0, high=1.0, shape=scalar_shape_stacked, dtype=np.float32)
         })
         self.action_space = spaces.Discrete(ACTION_SPACE_SIZE)
 
@@ -141,6 +150,7 @@ class GameEnvironment(gym.Env):
         self._precompute_action_mappings()
 
     def _reset_internal_state(self):
+        """【V9 修改】重置内部状态，并用零状态填充历史队列"""
         self.board.fill(None)
         self.piece_vectors = {p: [np.zeros(TOTAL_POSITIONS, dtype=bool) for _ in range(NUM_PIECE_TYPES)] for p in [1, -1]}
         self.revealed_vectors = {p: np.zeros(TOTAL_POSITIONS, dtype=bool) for p in [1, -1]}
@@ -152,98 +162,86 @@ class GameEnvironment(gym.Env):
         self.total_step_counter = 0
         self.scores = {-1: 0, 1: 0}
         self.survival_vectors = {p: np.ones(8, dtype=np.float32) for p in [1, -1]}
-        # 【V8 新增】重置 last_action
         self.last_action = -1
+
+        # --- 新增：填充历史状态 ---
+        # 创建一个代表游戏初始状态的“零”观察
+        initial_board_state = self._get_board_state_tensor()
+        initial_scalar_state = self._get_scalar_state_vector()
+        
+        self.board_history.clear()
+        self.scalar_history.clear()
+        
+        for _ in range(self.stack_size):
+            self.board_history.append(initial_board_state.copy())
+            self.scalar_history.append(initial_scalar_state.copy())
 
     def reload_opponent_pool(self, new_opponent_data: List[Dict[str, Any]]):
         self.opponent_data = new_opponent_data
-        # 强制重置对手选择状态。
-        # _select_active_opponent 将会检测到权重不匹配并重新生成所有目标和计数。
         self.opponent_weights = {}
         return True
 
     def _internal_reset(self, seed: Optional[int] = None):
-        """内部重置，仅重置游戏状态，不处理对手选择或先手轮换。"""
         if USE_FIXED_SEED_FOR_TRAINING:
-            # 如果启用了固定种子，则忽略外部传入的seed，使用常量中定义的值
             seed = FIXED_SEED_VALUE
         super().reset(seed=seed)
+        self._reset_internal_state() # 重置并填充历史
         self._initialize_board()
+        
+        # 【V9 新增】初始化后，用真实的初始状态更新历史记录
+        # 这一步很重要，因为它反映了随机翻开的棋子
+        self._update_history()
+        
         self.current_player = 1
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
-        """
-        重置游戏环境。
-        此方法会轮换先手玩家。如果轮到对手先手，则会让对手模型先执行一步。
-        """
-        # 如果一局游戏刚刚结束，为刚刚对战过的对手增加完成局数计数
         if self.current_opponent_path and self.current_opponent_path in self.opponent_completed_games:
             self.opponent_completed_games[self.current_opponent_path] += 1
 
-        self._reset_internal_state() # 【V8 修改】使用新的重置函数
-        self._initialize_board()
+        # 【V9 修改】调用 internal_reset，它现在会处理历史队列
+        self._internal_reset(seed=seed) 
+
         self._select_active_opponent()
-
-        # 轮换先手玩家
         self.current_player = self._first_player_alternator
-        self._first_player_alternator *= -1  # 为下一次reset翻转
+        self._first_player_alternator *= -1
 
-        # 如果对手是先手，并且存在对手模型，则让对手先走一步
         if self.active_opponent and self.current_player != self.learning_player_id:
-            # _execute_opponent_move 内部会使用 self.current_player 获取状态并执行动作,
-            # 它不会改变 self.current_player 的值。
-            # 函数返回元组 (reward, terminated, truncated, winner), 在此忽略。
             self._execute_opponent_move()
-            
-            # 对手下完后，轮到学习玩家
             self.current_player *= -1
 
         info = {'action_mask': self.action_masks(), 'winner': None}
         return self.get_state(), info
 
     def _select_active_opponent(self):
-        """
-        根据持久化的目标和已完成局数选择对手，以减少模型切换。
-        """
         if not self.opponent_data:
             self.active_opponent = None
             return
 
-        # 1. 检测模型池是否变更，如果变更则重置相关状态
         current_weights = {item['path']: item['weight'] for item in self.opponent_data}
         if self.opponent_weights != current_weights:
             self.opponent_weights = current_weights
-            # 重置对手完成局数
             self.opponent_completed_games = {item['path']: 0 for item in self.opponent_data}
-            # 重置游戏阶段乘数
             self.game_phase_multiplier = 20
-            # 计算对手目标局数
             self.opponent_target_games = {
                 item['path']: math.ceil(item['weight'] * self.game_phase_multiplier)
                 for item in self.opponent_data
             }
 
-        # 2. 检查当前阶段是否已完成
-        # 使用 self.opponent_weights.keys() 作为权威的模型列表，以处理中途有模型被移除的情况
         all_targets_met = all(
             self.opponent_completed_games.get(path, 0) >= self.opponent_target_games.get(path, 0)
             for path in self.opponent_weights.keys()
         )
 
         if all_targets_met:
-            # 3. 如果完成，则进入下一阶段并更新目标
-            self.game_phase_multiplier += 20 # 20 -> 40 -> 60 ...
+            self.game_phase_multiplier += 20
             self.opponent_target_games = {
                 path: math.ceil(weight * self.game_phase_multiplier)
                 for path, weight in self.opponent_weights.items()
             }
 
-        # 4. 按顺序选择下一个要进行游戏的对手
         next_opponent_path = None
-        # 迭代 self.opponent_data 以保持原始顺序
         for item in self.opponent_data:
             path = item['path']
-            # 防御性检查，确保新加入的模型在字典中
             if path not in self.opponent_completed_games: self.opponent_completed_games[path] = 0
             if path not in self.opponent_target_games: self.opponent_target_games[path] = math.ceil(item['weight'] * self.game_phase_multiplier)
             
@@ -251,7 +249,6 @@ class GameEnvironment(gym.Env):
                 next_opponent_path = path
                 break
         
-        # 如果找不到（例如，由于状态不一致），选择第一个作为后备
         if next_opponent_path is None:
             if self.opponent_data:
                 next_opponent_path = self.opponent_data[0]['path']
@@ -259,41 +256,37 @@ class GameEnvironment(gym.Env):
                 self.active_opponent = None
                 return
 
-        # 5. 设置活跃对手
         self.current_opponent_path = next_opponent_path
         chosen_model_data = next((item for item in self.opponent_data if item['path'] == self.current_opponent_path), None)
         if chosen_model_data is None:
             raise ValueError(f"环境内错误：找不到预加载的对手模型 {self.current_opponent_path}。")
         self.active_opponent = chosen_model_data['model']
 
-
     def step(self, action_index: int) -> Tuple[dict, float, bool, bool, dict]:
         reward = 0.0
-        #prev_threat = self._calculate_threat_potential()
-        move_reward, terminated, truncated, winner = self._internal_apply_action(action_index)
-        #reward = self.shaping_coef * move_reward
+        _, terminated, truncated, winner = self._internal_apply_action(action_index)
+        
         if terminated or truncated:
             final_reward = self._calculate_final_reward(reward, winner, terminated)
             return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
-        #reward += self._calculate_shaping_reward(prev_threat)
+        
         self.current_player *= -1
+        
         if self.active_opponent:
-            opp_reward, terminated, truncated, winner = self._execute_opponent_move()
-            #reward -= self.shaping_coef * opp_reward
+            _, terminated, truncated, winner = self._execute_opponent_move()
             if terminated or truncated:
                 final_reward = self._calculate_final_reward(reward, winner, terminated)
                 return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
+        
         self.current_player *= -1
         return self.get_state(), np.float32(reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
 
     def _internal_apply_action(self, action_index: int) -> Tuple[float, bool, bool, Optional[int]]:
         if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
         
-        # 【V8 修改】在执行动作前记录
         self.last_action = action_index
         self.total_step_counter += 1
         
-        immediate_reward = 0.0
         if action_index < REVEAL_ACTIONS_COUNT:
             sq = POS_TO_SQ[self.action_to_coords[action_index]]
             piece = self.board[sq]
@@ -304,9 +297,20 @@ class GameEnvironment(gym.Env):
             self.move_counter = 0
         else:
             from_sq, to_sq = POS_TO_SQ[self.action_to_coords[action_index][0]], POS_TO_SQ[self.action_to_coords[action_index][1]]
-            immediate_reward = self._apply_move_action(from_sq, to_sq)
+            self._apply_move_action(from_sq, to_sq)
+        
+        # 【V9 修改】在检查游戏结束前更新历史
+        self._update_history()
+        
         terminated, truncated, winner = self._check_game_over_conditions()
-        return immediate_reward, terminated, truncated, winner
+        return 0.0, terminated, truncated, winner
+    
+    def _update_history(self):
+        """【V9 新增】获取当前单帧状态并将其添加到历史队列中"""
+        current_board = self._get_board_state_tensor()
+        current_scalars = self._get_scalar_state_vector()
+        self.board_history.append(current_board)
+        self.scalar_history.append(current_scalars)
 
     def _apply_move_action(self, from_sq: int, to_sq: int) -> float:
         attacker = self.board[from_sq]
@@ -338,9 +342,15 @@ class GameEnvironment(gym.Env):
         return False, False, None
 
     def get_state(self) -> Dict[str, np.ndarray]:
-        return {"board": self._get_board_state_tensor(), "scalars": self._get_scalar_state_vector()}
+        """【V9 修改】从历史队列拼接并返回最终的堆叠状态"""
+        # 沿通道轴（axis=0）拼接棋盘历史
+        stacked_board = np.concatenate(list(self.board_history), axis=0).astype(np.float32)
+        # 展平并拼接标量历史
+        stacked_scalars = np.concatenate(list(self.scalar_history), axis=0).astype(np.float32)
+        return {"board": stacked_board, "scalars": stacked_scalars}
 
     def _get_board_state_tensor(self) -> np.ndarray:
+        """获取【单帧】棋盘状态张量"""
         my_player, opponent_player = self.current_player, -self.current_player
         tensors = [vec.reshape(BOARD_ROWS, BOARD_COLS) for vec in self.piece_vectors[my_player]]
         tensors.extend([vec.reshape(BOARD_ROWS, BOARD_COLS) for vec in self.piece_vectors[opponent_player]])
@@ -349,25 +359,17 @@ class GameEnvironment(gym.Env):
         return np.array(tensors, dtype=np.float32)
 
     def _get_scalar_state_vector(self) -> np.ndarray:
+        """获取【单帧】标量状态向量"""
         my_player, opponent_player = self.current_player, -self.current_player
-        
-        # 【V8 修改】创建并拼接新的状态信息
-        
-        # 1. 基础标量
         base_scalars = np.array([
             self.scores[my_player] / WINNING_SCORE, 
             self.scores[opponent_player] / WINNING_SCORE,
             self.move_counter / MAX_CONSECUTIVE_MOVES_FOR_DRAW
         ], dtype=np.float32)
-
-        # 2. 总步数
-        total_steps_scalar = np.array([self.total_step_counter], dtype=np.float32)
-
-        # 3. 上一步动作 (独热编码)
+        total_steps_scalar = np.array([self.total_step_counter / MAX_STEPS_PER_EPISODE], dtype=np.float32)
         last_action_one_hot = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
         if self.last_action != -1:
             last_action_one_hot[self.last_action] = 1.0
-
         return np.concatenate([
             base_scalars,
             self.survival_vectors[my_player], 
@@ -533,10 +535,7 @@ class GameEnvironment(gym.Env):
                             idx += 1
 
     def _initialize_board(self):
-        # 【V8 修改】不再调用 _reset_internal_state，因为它在 reset() 的开头被调用
         pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
-        # --- 【核心修改】使用 self.np_random (由 super().reset(seed=...) 创建) 来洗牌 ---
-        # 确保随机性来源一致且可复现
         rng = self.np_random
         rng.shuffle(pieces)
         for sq, piece in enumerate(pieces):
@@ -544,10 +543,7 @@ class GameEnvironment(gym.Env):
             self.empty_vector[sq] = False
             self.hidden_vector[sq] = True
         
-        # --- 【新增】游戏开局后随机翻开棋子 ---
-        # 根据 INITIAL_REVEALED_PIECES 常量控制翻开的棋子数量
         if INITIAL_REVEALED_PIECES > 0:
-            # 确保翻开数量不超过棋盘总位置数
             reveal_count = min(INITIAL_REVEALED_PIECES, TOTAL_POSITIONS)
             positions_to_reveal = rng.choice(TOTAL_POSITIONS, size=reveal_count, replace=False)
             for sq in positions_to_reveal:

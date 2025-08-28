@@ -46,6 +46,7 @@ class CustomNetwork(BaseFeaturesExtractor):
     【V8 版】自定义特征提取器。
     - CNN处理棋盘，MLP处理标量。
     - 两者的输出被拼接（Concatenate）后，送入Actor/Critic头。
+    - 【V9 兼容】: 无需修改即可自动适应状态堆叠后的输入维度。
     """
     def __init__(self, 
                  observation_space: gym.spaces.Dict, 
@@ -61,12 +62,14 @@ class CustomNetwork(BaseFeaturesExtractor):
         scalars_space = observation_space['scalars']
         
         # --- 1. CNN 分支 (处理棋盘) ---
+        # 这行代码会自动获取堆叠后的通道数
         in_channels = board_space.shape[0]
         self.cnn_head = nn.Conv2d(in_channels, num_hidden_channels, kernel_size=3, padding=1, bias=False)
         self.res_blocks = nn.ModuleList([ResidualBlock(num_hidden_channels) for _ in range(num_res_blocks)])
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         
         # --- 2. MLP 分支 (处理标量) ---
+        # 这行代码会自动获取堆叠后的标量维度
         scalar_input_dim = scalars_space.shape[0]
         self.scalar_encoder = nn.Sequential(
             nn.Linear(scalar_input_dim, 256),
