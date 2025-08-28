@@ -1,4 +1,4 @@
-# training/trainer.py
+# src_code/training/trainer.py
 
 import os
 import shutil
@@ -22,15 +22,13 @@ def create_new_ppo_model(env=None, tensorboard_log=None):
     """
     创建一个全新的随机初始化的PPO模型。
     """
-    # 【V6 优化】为解耦的网络结构推荐新的网络架构
-    # CustomActorCriticPolicy 内部的 CustomNetwork 输出维度为 num_hidden_channels
-    input_dim = NETWORK_NUM_HIDDEN_CHANNELS # e.g. 128
+    # 【V8 修改】输入维度现在是CNN和MLP输出之和
+    input_dim = NETWORK_NUM_HIDDEN_CHANNELS + SCALAR_ENCODER_OUTPUT_DIM
 
     # 推荐方案: 强化价值网络
-    # 价值网络(vf)比策略网络(pi)更深更宽，以增强其对复杂状态价值的拟合能力。
     policy_net_arch = dict(
-        pi=[input_dim, input_dim // 2],          # 策略头: [128, 64] - 相对简洁，专注决策
-        vf=[input_dim * 2, input_dim, input_dim // 2] # 价值头: [256, 128, 64] - 更深更宽，专注评估
+        pi=[input_dim, input_dim // 2],
+        vf=[input_dim * 2, input_dim, input_dim // 2]
     )
 
     model = MaskablePPO(
@@ -49,8 +47,6 @@ def create_new_ppo_model(env=None, tensorboard_log=None):
         device=PPO_DEVICE,
         verbose=PPO_VERBOSE,
         policy_kwargs={
-            # CustomActorCriticPolicy 会自动使用 CustomNetwork 作为特征提取器。
-            # 这里仅需传递 MLP 头的网络结构。
             "net_arch": policy_net_arch,
         }
     )
@@ -60,8 +56,9 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
     """
     加载PPO模型并应用自定义超参数。
     """
-    # 【V6 优化】为解耦的网络结构推荐新的网络架构
-    input_dim = NETWORK_NUM_HIDDEN_CHANNELS
+    # 【V8 修改】输入维度现在是CNN和MLP输出之和
+    input_dim = NETWORK_NUM_HIDDEN_CHANNELS + SCALAR_ENCODER_OUTPUT_DIM
+    
     policy_net_arch = dict(
         pi=[input_dim, input_dim // 2],
         vf=[input_dim * 2, input_dim, input_dim // 2]
@@ -75,8 +72,6 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
         tensorboard_log=tensorboard_log,
         n_steps=PPO_N_STEPS,
         device=PPO_DEVICE,
-        # 【重要修复】加载模型时必须传递 policy_kwargs 和 custom_objects，
-        # 否则网络结构会恢复为默认值！
         custom_objects={
             "policy_class": CustomActorCriticPolicy
         },

@@ -1,4 +1,4 @@
-# src_code/game/environment.py (已修复)
+# src_code/game/environment.py
 import os
 import random
 from enum import Enum
@@ -109,6 +109,9 @@ class GameEnvironment(gym.Env):
         self.coords_to_action: Dict[Any, int] = {}
         self._first_player_alternator: int = 1
         
+        # 【V8 新增】用于追踪上一步动作
+        self.last_action: int = -1 
+        
         # --- 用于持久化对手选择逻辑的状态 ---
         self.opponent_weights: Dict[str, float] = {}
         self.opponent_target_games: Dict[str, int] = {}
@@ -121,7 +124,11 @@ class GameEnvironment(gym.Env):
     def _initialize_spaces(self):
         num_channels = NUM_PIECE_TYPES * 2 + 2
         board_shape = (num_channels, BOARD_ROWS, BOARD_COLS)
-        scalar_shape = (3 + 8 + 8,)
+        
+        # 【V8 修改】为标量向量增加 last_action (独热编码) 和 total_steps
+        # 3 (scores, move_counter) + 8 (my_surv) + 8 (opp_surv) + 1 (total_steps) + ACTION_SPACE_SIZE (last_action one-hot)
+        scalar_shape = (3 + 8 + 8 + 1 + ACTION_SPACE_SIZE,)
+        
         self.observation_space = spaces.Dict({
             "board": spaces.Box(low=0.0, high=1.0, shape=board_shape, dtype=np.float32),
             "scalars": spaces.Box(low=0.0, high=1.0, shape=scalar_shape, dtype=np.float32)
@@ -145,6 +152,8 @@ class GameEnvironment(gym.Env):
         self.total_step_counter = 0
         self.scores = {-1: 0, 1: 0}
         self.survival_vectors = {p: np.ones(8, dtype=np.float32) for p in [1, -1]}
+        # 【V8 新增】重置 last_action
+        self.last_action = -1
 
     def reload_opponent_pool(self, new_opponent_data: List[Dict[str, Any]]):
         self.opponent_data = new_opponent_data
@@ -171,8 +180,8 @@ class GameEnvironment(gym.Env):
         if self.current_opponent_path and self.current_opponent_path in self.opponent_completed_games:
             self.opponent_completed_games[self.current_opponent_path] += 1
 
-
-        self._internal_reset(seed)
+        self._reset_internal_state() # 【V8 修改】使用新的重置函数
+        self._initialize_board()
         self._select_active_opponent()
 
         # 轮换先手玩家
@@ -279,7 +288,11 @@ class GameEnvironment(gym.Env):
 
     def _internal_apply_action(self, action_index: int) -> Tuple[float, bool, bool, Optional[int]]:
         if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
+        
+        # 【V8 修改】在执行动作前记录
+        self.last_action = action_index
         self.total_step_counter += 1
+        
         immediate_reward = 0.0
         if action_index < REVEAL_ACTIONS_COUNT:
             sq = POS_TO_SQ[self.action_to_coords[action_index]]
@@ -337,10 +350,30 @@ class GameEnvironment(gym.Env):
 
     def _get_scalar_state_vector(self) -> np.ndarray:
         my_player, opponent_player = self.current_player, -self.current_player
+        
+        # 【V8 修改】创建并拼接新的状态信息
+        
+        # 1. 基础标量
+        base_scalars = np.array([
+            self.scores[my_player] / WINNING_SCORE, 
+            self.scores[opponent_player] / WINNING_SCORE,
+            self.move_counter / MAX_CONSECUTIVE_MOVES_FOR_DRAW
+        ], dtype=np.float32)
+
+        # 2. 总步数
+        total_steps_scalar = np.array([self.total_step_counter], dtype=np.float32)
+
+        # 3. 上一步动作 (独热编码)
+        last_action_one_hot = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
+        if self.last_action != -1:
+            last_action_one_hot[self.last_action] = 1.0
+
         return np.concatenate([
-            np.array([self.scores[my_player] / WINNING_SCORE, self.scores[opponent_player] / WINNING_SCORE,
-                      self.move_counter / MAX_CONSECUTIVE_MOVES_FOR_DRAW], dtype=np.float32),
-            self.survival_vectors[my_player], self.survival_vectors[opponent_player]
+            base_scalars,
+            self.survival_vectors[my_player], 
+            self.survival_vectors[opponent_player],
+            total_steps_scalar,
+            last_action_one_hot
         ])
 
     def action_masks(self, player_id: int = None) -> np.ndarray:
@@ -500,7 +533,7 @@ class GameEnvironment(gym.Env):
                             idx += 1
 
     def _initialize_board(self):
-        self._reset_internal_state()
+        # 【V8 修改】不再调用 _reset_internal_state，因为它在 reset() 的开头被调用
         pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
         # --- 【核心修改】使用 self.np_random (由 super().reset(seed=...) 创建) 来洗牌 ---
         # 确保随机性来源一致且可复现

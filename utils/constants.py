@@ -1,4 +1,4 @@
-# utils/constants.py
+# src_code/utils/constants.py
 
 import os
 import torch
@@ -67,12 +67,14 @@ PPO_SHOW_PROGRESS = True
 # ==============================================================================
 # --- 4. 神经网络架构超参数 (主要调优目标) ---
 # ==============================================================================
-# 特征提取器最终输出的特征维度
-NETWORK_FEATURES_DIM = 256
+# 【V8 移除】此项不再直接使用，由CNN和MLP输出维度相加决定
+# NETWORK_FEATURES_DIM = 256
 # CNN中的残差块数量
 NETWORK_NUM_RES_BLOCKS = 5
 # CNN中的隐藏层通道数
 NETWORK_NUM_HIDDEN_CHANNELS = 128
+# 【V8 新增】处理标量信息的MLP的输出维度
+SCALAR_ENCODER_OUTPUT_DIM = 64
 
 
 # ==============================================================================
