@@ -70,11 +70,11 @@ PPO_SHOW_PROGRESS = True
 # 【V8 移除】此项不再直接使用，由CNN和MLP输出维度相加决定
 # NETWORK_FEATURES_DIM = 256
 # CNN中的残差块数量
-NETWORK_NUM_RES_BLOCKS = 5
+NETWORK_NUM_RES_BLOCKS = 8 # 从 5 增加到 8，加深网络
 # CNN中的隐藏层通道数
-NETWORK_NUM_HIDDEN_CHANNELS = 128
+NETWORK_NUM_HIDDEN_CHANNELS = 256 # 从 128 增加到 256，加宽网络
 # 【V8 新增】处理标量信息的MLP的输出维度
-SCALAR_ENCODER_OUTPUT_DIM = 64
+SCALAR_ENCODER_OUTPUT_DIM = 128 # 从 64 增加到 128，加宽网络
 
 
 # ==============================================================================

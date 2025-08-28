@@ -25,10 +25,10 @@ def create_new_ppo_model(env=None, tensorboard_log=None):
     # 【V8 修改】输入维度现在是CNN和MLP输出之和
     input_dim = NETWORK_NUM_HIDDEN_CHANNELS + SCALAR_ENCODER_OUTPUT_DIM
 
-    # 推荐方案: 强化价值网络
+    # 推荐方案: 强化价值网络 (已加深加宽)
     policy_net_arch = dict(
-        pi=[input_dim, input_dim // 2],
-        vf=[input_dim * 2, input_dim, input_dim // 2]
+        pi=[input_dim, input_dim * 2, input_dim],
+        vf=[input_dim, input_dim * 2, input_dim * 2, input_dim]
     )
 
     model = MaskablePPO(
@@ -59,9 +59,10 @@ def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=N
     # 【V8 修改】输入维度现在是CNN和MLP输出之和
     input_dim = NETWORK_NUM_HIDDEN_CHANNELS + SCALAR_ENCODER_OUTPUT_DIM
     
+    # 推荐方案: 强化价值网络 (已加深加宽)
     policy_net_arch = dict(
-        pi=[input_dim, input_dim // 2],
-        vf=[input_dim * 2, input_dim, input_dim // 2]
+        pi=[input_dim, input_dim * 2, input_dim],
+        vf=[input_dim, input_dim * 2, input_dim * 2, input_dim]
     )
 
     model = MaskablePPO.load(
