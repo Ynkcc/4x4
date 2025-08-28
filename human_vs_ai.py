@@ -65,10 +65,13 @@ class MainWindow(QMainWindow):
         # GUI 内部状态
         self.selected_from_sq = None
         self.valid_action_mask = np.zeros(ACTION_SPACE_SIZE, dtype=int)
+        self.first_player = 1 # 新增：用于控制先手玩家，1为红方，-1为黑方
 
         # AI 相关状态
-        self.ai_model = None
-        self.ai_player = None  # None表示人人对战，1或-1表示AI控制的玩家
+        self.ai_model_a = None # 原ai_model
+        self.ai_model_b = None # 新增AI模型B
+        self.ai_models = {} # 用于存储当前对局中使用的AI模型 {1: model_a, -1: model_b}
+        self.ai_player_config = None # None, 1, -1, "both"
         self.ai_thinking = False
         self.game_over = False
 
@@ -100,33 +103,53 @@ class MainWindow(QMainWindow):
         # 游戏模式选择
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["人 vs 人", "人 vs AI (你是红方)", "人 vs AI (你是黑方)", "AI vs AI"])
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_change) # 关联模式切换事件
         if not AI_AVAILABLE:
             self.mode_combo.setEnabled(False)
             self.mode_combo.setToolTip("需要安装 sb3-contrib 来启用AI功能")
         ai_layout.addRow("游戏模式:", self.mode_combo)
 
-        # AI模型路径
-        self.model_path_edit = QLineEdit("./models/self_play_final/challenger.zip")
-        self.model_path_edit.setPlaceholderText("输入AI模型文件路径")
-        ai_layout.addRow("AI模型路径:", self.model_path_edit)
+        # AI模型A路径
+        self.model_a_path_edit = QLineEdit("./models/self_play_final/main_opponent.zip")
+        self.model_a_path_edit.setPlaceholderText("输入AI模型A文件路径")
+        self.model_a_label = QLabel("AI 模型 A (红方):")
+        ai_layout.addRow(self.model_a_label, self.model_a_path_edit)
 
-        # 加载AI按钮
-        self.load_ai_button = QPushButton("加载 AI 模型")
-        self.load_ai_button.clicked.connect(self.load_ai_model)
+        # 加载AI模型A按钮
+        self.load_ai_a_button = QPushButton("加载 AI 模型 A")
+        self.load_ai_a_button.clicked.connect(lambda: self.load_ai_model('a'))
         if not AI_AVAILABLE:
-            self.load_ai_button.setEnabled(False)
-        ai_layout.addRow(self.load_ai_button)
+            self.load_ai_a_button.setEnabled(False)
+        ai_layout.addRow(self.load_ai_a_button)
 
-        # AI状态显示
-        self.ai_status_label = QLabel("AI状态: 未加载")
-        ai_layout.addRow(self.ai_status_label)
+        # AI模型A状态显示
+        self.ai_a_status_label = QLabel("AI A状态: 未加载")
+        ai_layout.addRow(self.ai_a_status_label)
 
+        # --- AI模型B相关控件 (默认隐藏) ---
+        self.model_b_label = QLabel("AI 模型 B (黑方):")
+        self.model_b_path_edit = QLineEdit("./models/self_play_final/challenger.zip")
+        self.model_b_path_edit.setPlaceholderText("输入AI模型B文件路径")
+        
+        self.load_ai_b_button = QPushButton("加载 AI 模型 B")
+        self.load_ai_b_button.clicked.connect(lambda: self.load_ai_model('b'))
+        if not AI_AVAILABLE: self.load_ai_b_button.setEnabled(False)
+        
+        self.ai_b_status_label = QLabel("AI B状态: 未加载")
+
+        ai_layout.addRow(self.model_b_label, self.model_b_path_edit)
+        ai_layout.addRow(self.load_ai_b_button)
+        ai_layout.addRow(self.ai_b_status_label)
+        
         # AI思考延迟
         self.ai_delay_edit = QLineEdit("500")
         self.ai_delay_edit.setPlaceholderText("毫秒")
         ai_layout.addRow("AI思考延迟:", self.ai_delay_edit)
-
+        
         ai_group.setLayout(ai_layout)
+        
+        # 初始隐藏模型B的控件
+        self.on_mode_change(0)
 
         # 游戏控制组
         control_group = QGroupBox("游戏控制")
@@ -135,6 +158,11 @@ class MainWindow(QMainWindow):
         self.new_game_button = QPushButton("开始新游戏")
         self.new_game_button.clicked.connect(self.new_game)
         control_layout.addWidget(self.new_game_button)
+
+        # 新增：切换先手按钮
+        self.switch_player_button = QPushButton("切换先手 (当前: 红方)")
+        self.switch_player_button.clicked.connect(self.switch_first_player)
+        control_layout.addWidget(self.switch_player_button)
 
         self.reset_button = QPushButton("重置当前游戏")
         self.reset_button.clicked.connect(self.reset_game)
@@ -274,61 +302,95 @@ class MainWindow(QMainWindow):
         main_splitter.addWidget(right_widget)
         main_splitter.setSizes([350, 500, 550])
 
-    def load_ai_model(self):
-        """加载AI模型。"""
+    def on_mode_change(self, index):
+        """当游戏模式下拉框变化时，控制UI显隐"""
+        is_ai_vs_ai = self.mode_combo.currentText() == "AI vs AI"
+        self.model_b_label.setVisible(is_ai_vs_ai)
+        self.model_b_path_edit.setVisible(is_ai_vs_ai)
+        self.load_ai_b_button.setVisible(is_ai_vs_ai)
+        self.ai_b_status_label.setVisible(is_ai_vs_ai)
+
+    def load_ai_model(self, model_type: str):
+        """加载AI模型 (a 或 b)。"""
         if not AI_AVAILABLE:
             self.log_message("错误: 未安装AI模型库 (pip install sb3-contrib)")
             return
 
-        model_path = self.model_path_edit.text().strip()
+        if model_type == 'a':
+            path_edit = self.model_a_path_edit
+            status_label = self.ai_a_status_label
+        else: # model_type == 'b'
+            path_edit = self.model_b_path_edit
+            status_label = self.ai_b_status_label
+
+        model_path = path_edit.text().strip()
         if not model_path:
-            self.log_message("错误: 请输入模型路径")
+            self.log_message(f"错误: 请输入模型 {model_type.upper()} 的路径")
             return
 
         try:
-            # 【移除】不再需要模型兼容性设置
-            self.ai_model = MaskablePPO.load(model_path)
-            self.ai_status_label.setText("AI状态: 已加载")
-            self.log_message(f"成功加载AI模型: {model_path}")
+            model = MaskablePPO.load(model_path)
+            if model_type == 'a':
+                self.ai_model_a = model
+            else:
+                self.ai_model_b = model
+            status_label.setText(f"AI {model_type.upper()}状态: 已加载")
+            self.log_message(f"成功加载AI模型 {model_type.upper()}: {model_path}")
         except Exception as e:
-            self.ai_status_label.setText("AI状态: 加载失败")
-            self.log_message(f"加载AI模型失败: {str(e)}")
+            status_label.setText(f"AI {model_type.upper()}状态: 加载失败")
+            self.log_message(f"加载AI模型 {model_type.upper()} 失败: {str(e)}")
+
+    def switch_first_player(self):
+        """切换先手玩家并重置游戏"""
+        self.first_player *= -1
+        player_name = "红方" if self.first_player == 1 else "黑方"
+        self.switch_player_button.setText(f"切换先手 (当前: {player_name})")
+        self.log_message(f"--- 先手已切换为: {player_name} ---")
+        self.reset_game()
 
     def new_game(self):
         """开始新游戏，根据选择的模式设置AI。"""
         mode = self.mode_combo.currentText()
+        self.ai_models.clear()
+        
+        if "AI" in mode:
+            if self.ai_model_a is None:
+                self.log_message("错误: 请先加载AI模型A")
+                return
+            if mode == "AI vs AI" and self.ai_model_b is None:
+                self.log_message("错误: 请先加载AI模型B")
+                return
 
-        if "AI" in mode and self.ai_model is None:
-            self.log_message("错误: 请先加载AI模型")
-            return
-
-        # 设置AI玩家
+        # 设置AI玩家配置
         if mode == "人 vs 人":
-            self.ai_player = None
+            self.ai_player_config = None
         elif mode == "人 vs AI (你是红方)":
-            self.ai_player = -1  # AI控制黑方
+            self.ai_player_config = -1  # AI控制黑方
+            self.ai_models[-1] = self.ai_model_a
         elif mode == "人 vs AI (你是黑方)":
-            self.ai_player = 1   # AI控制红方
+            self.ai_player_config = 1   # AI控制红方
+            self.ai_models[1] = self.ai_model_a
         elif mode == "AI vs AI":
-            self.ai_player = "both"  # AI控制双方
+            self.ai_player_config = "both"  # AI控制双方
+            self.ai_models[1] = self.ai_model_a
+            self.ai_models[-1] = self.ai_model_b
 
         self.log_message(f"--- 开始新游戏: {mode} ---")
         self.reset_game()
-
 
     def reset_game(self):
         """重置游戏状态。"""
         self.selected_from_sq = None
         self.ai_thinking = False
         self.game_over = False
-        # 【修正】reset方法返回的info中包含初始动作掩码
+        
         self.game._internal_reset()
+        self.game.current_player = self.first_player # 设置先手
         self.valid_action_mask = self.game.action_masks()
         self.update_gui()
 
-        # 如果AI是红方或AI对战模式，让AI先行
-        if not self.game_over and (self.ai_player == self.game.current_player or self.ai_player == "both"):
-            self.schedule_ai_move()
+        # 检查是否轮到AI行动
+        self.check_and_schedule_ai_move()
 
     def on_board_click(self, pos):
         """处理棋盘点击事件 (已优化选择逻辑)。"""
@@ -336,7 +398,8 @@ class MainWindow(QMainWindow):
             return
 
         # 检查是否轮到人类玩家
-        if self.ai_player is not None and (self.ai_player == self.game.current_player or self.ai_player == "both"):
+        if self.ai_player_config is not None and \
+           (self.ai_player_config == self.game.current_player or self.ai_player_config == "both"):
             return
 
         clicked_sq = POS_TO_SQ[pos]
@@ -377,7 +440,6 @@ class MainWindow(QMainWindow):
     def make_move(self, action_index):
         """
         【核心修正】执行一步棋并更新状态。
-        此版本不再使用 game.step()，而是使用更底层的函数来手动控制游戏流程。
         """
         if self.game_over:
             return
@@ -401,8 +463,7 @@ class MainWindow(QMainWindow):
                 move_desc = f"用 {attacker_name} 从 {coords[0]} 吃掉了 {coords[1]} 的 {defender_name}"
         self.log_message(f"{player_name}: {move_desc}")
 
-        # --- 修正逻辑开始 ---
-        # 1. 调用公共方法，只应用一个动作，不触发对手回合
+        # 1. 应用动作
         _, terminated, truncated, winner = self.game.apply_single_action(action_index)
         self.selected_from_sq = None
 
@@ -418,29 +479,30 @@ class MainWindow(QMainWindow):
         else:
             # 3. 如果游戏未结束，手动切换玩家
             self.game.current_player *= -1
-            # 4. 为新玩家获取合法的动作
             self.valid_action_mask = self.game.action_masks()
-            # 5. 再次检查新玩家是否有棋可走
+            # 4. 再次检查新玩家是否有棋可走
             if np.sum(self.valid_action_mask) == 0:
                 self.game_over = True
-                # 当前玩家无棋可走，对手获胜
                 winner = -self.game.current_player
                 winner_name = "红方" if winner == 1 else "黑方"
                 self.log_message(f"--- {player_name} 无棋可走，{winner_name}获胜! ---")
-
-        # --- 修正逻辑结束 ---
-
+        
         # 更新UI
         self.update_gui()
 
-        # 如果游戏没结束且轮到AI，安排AI移动
-        if not self.game_over and self.ai_player is not None and \
-           (self.ai_player == self.game.current_player or self.ai_player == "both"):
-            self.schedule_ai_move()
+        # 检查是否轮到AI行动
+        self.check_and_schedule_ai_move()
 
+    def check_and_schedule_ai_move(self):
+        """检查当前是否轮到AI，如果是则安排移动"""
+        if not self.game_over and self.ai_player_config is not None and \
+           (self.ai_player_config == self.game.current_player or self.ai_player_config == "both"):
+            self.schedule_ai_move()
+            
     def schedule_ai_move(self):
         """安排AI移动。"""
-        if self.game_over or self.ai_model is None:
+        current_ai_model = self.ai_models.get(self.game.current_player)
+        if self.game_over or current_ai_model is None:
             return
 
         delay = int(self.ai_delay_edit.text() or "500")
@@ -454,7 +516,8 @@ class MainWindow(QMainWindow):
 
     def make_ai_move(self):
         """执行AI移动。"""
-        if self.ai_model is None or self.game_over:
+        current_ai_model = self.ai_models.get(self.game.current_player)
+        if current_ai_model is None or self.game_over:
             self.ai_thinking = False
             return
 
@@ -467,9 +530,8 @@ class MainWindow(QMainWindow):
                 self.ai_thinking = False
                 return
 
-            action, _ = self.ai_model.predict(state, action_masks=action_mask, deterministic=True)
+            action, _ = current_ai_model.predict(state, action_masks=action_mask, deterministic=True)
             
-            # AI移动后，立即清除思考状态
             self.ai_thinking = False
             self.make_move(int(action))
 
@@ -479,9 +541,7 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             self.ai_thinking = False
         finally:
-            # 确保UI在任何情况下都能刷新
             self.update_gui()
-
 
     def log_message(self, message):
         """添加日志消息。"""
@@ -514,7 +574,7 @@ class MainWindow(QMainWindow):
         movable_pieces_pos = set()
 
         is_human_turn = (not self.ai_thinking and not self.game_over and
-                         (self.ai_player is None or (self.ai_player != "both" and self.ai_player != self.game.current_player)))
+                         (self.ai_player_config is None or (self.ai_player_config != "both" and self.ai_player_config != self.game.current_player)))
 
         if is_human_turn:
             if self.selected_from_sq is not None:
@@ -597,8 +657,8 @@ class MainWindow(QMainWindow):
         # 当前玩家
         player_name = "红方" if self.game.current_player == 1 else "黑方"
         player_role = ""
-        if self.ai_player is not None and not self.game_over:
-             if self.ai_player == self.game.current_player or self.ai_player == "both":
+        if self.ai_player_config is not None and not self.game_over:
+             if self.ai_player_config == self.game.current_player or self.ai_player_config == "both":
                  player_role = " (AI)"
              else:
                  player_role = " (你)"
