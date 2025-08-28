@@ -96,8 +96,8 @@ ELO_WEIGHT_TEMPERATURE = 100
 # --- 新增：对手池采样配置 ---
 # 从长期+短期池中随机选择的参训模型数量
 TRAINING_POOL_SAMPLE_SIZE = 6
-# 主宰者在最终对手池中的最小权重比例 (确保不少于51%)
-MAIN_OPPONENT_MIN_WEIGHT_RATIO = 0.51
+# 主宰者在最终对手池中的最小权重比例 (确保不少于75%)
+MAIN_OPPONENT_MIN_WEIGHT_RATIO = 0.75
 # 长期池模型相对于短期池模型的权重倍数 (用于加权随机采样)
 LONG_TERM_POOL_WEIGHT_MULTIPLIER = 2.0
 

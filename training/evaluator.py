@@ -107,12 +107,12 @@ def evaluate_models(challenger_path: str, main_opponent_path: str, show_progress
             
     eval_env.close()
 
-    total_games = scores['challenger_wins'] + scores['opponent_wins']
+    total_games = scores['challenger_wins'] + scores['opponent_wins'] + scores['draws']
     win_rate = scores['challenger_wins'] / total_games if total_games > 0 else 0.0
 
     if show_progress:
         print(f"\n--- 📊 评估结束: 共进行了 {EVALUATION_GAMES} 局游戏 ---")
         print(f"    挑战者战绩: {scores['challenger_wins']}胜 / {scores['opponent_wins']}负 / {scores['draws']}平")
-        print(f"    挑战者胜率 (胜 / (胜+负)): {win_rate:.2%}")
-    
+        print(f"    挑战者胜率 (胜 / (胜+负+平)): {win_rate:.2%}")
+
     return win_rate
