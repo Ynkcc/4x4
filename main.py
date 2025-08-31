@@ -1,7 +1,14 @@
 # main.py
 
 import os
+import sys
 import warnings
+
+# 设置标准输出编码为UTF-8（解决Windows下的编码问题）
+if sys.platform == "win32":
+    import codecs
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
 
 # 禁用TensorFlow警告
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 禁用INFO和WARNING日志

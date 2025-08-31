@@ -24,6 +24,7 @@ try:
     AI_AVAILABLE = True
     print("AI模型支持已加载")
 except ImportError:
+    MaskablePPO = None  # type: ignore
     AI_AVAILABLE = False
     print("警告: 未找到AI模型库(sb3_contrib)，只能进行人人对战")
 
@@ -329,7 +330,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            model = MaskablePPO.load(model_path)
+            model = MaskablePPO.load(model_path)  # type: ignore
             if model_type == 'a':
                 self.ai_model_a = model
             else:
@@ -448,7 +449,9 @@ class MainWindow(QMainWindow):
         coords = self.game.action_to_coords.get(action_index)
         player_name = "红方" if self.game.current_player == 1 else "黑方"
         move_desc = ""
-        if action_index < REVEAL_ACTIONS_COUNT:
+        if coords is None:
+            move_desc = f"未知动作 {action_index}"
+        elif action_index < REVEAL_ACTIONS_COUNT:
             move_desc = f"翻开了 ({coords[0]}, {coords[1]}) 位置的棋子"
         else:
             from_sq = POS_TO_SQ[coords[0]]
@@ -581,7 +584,7 @@ class MainWindow(QMainWindow):
                 # --- 已选择棋子：高亮目标位置 ---
                 from_pos_selected = tuple(SQ_TO_POS[self.selected_from_sq])
                 selected_piece = self.game.board[self.selected_from_sq]
-                is_cannon = selected_piece.piece_type == PieceType.CANNON
+                is_cannon = selected_piece.piece_type == PieceType.CANNON if selected_piece else False
 
                 for action_index, is_valid in enumerate(self.valid_action_mask):
                     if not is_valid: continue

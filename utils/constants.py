@@ -108,7 +108,7 @@ LONG_TERM_POOL_WEIGHT_MULTIPLIER = 2.0
 # 总共进行多少次 "训练 -> 评估" 的大循环
 TOTAL_TRAINING_LOOPS = 1000
 # 用于训练的并行环境数量
-N_ENVS = 8
+N_ENVS = 6
 # 在每次大循环中，学习者模型训练的总步数
 STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 
@@ -119,7 +119,7 @@ STEPS_PER_LOOP = PPO_N_STEPS * N_ENVS * 8
 # 每次评估时进行的游戏局数 (必须是偶数，以进行镜像对局)
 EVALUATION_GAMES = 50
 # 挑战者胜率需要超过此阈值才能取代主宰者
-EVALUATION_THRESHOLD = 0.7
+EVALUATION_THRESHOLD = 0.58
 # 评估时使用的并行环境数量 (通常为1)
 EVALUATION_N_ENVS = 1
 
