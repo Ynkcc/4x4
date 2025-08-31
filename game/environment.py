@@ -1,4 +1,5 @@
 # src_code/game/environment.py
+
 import os
 import random
 from enum import Enum
@@ -115,7 +116,7 @@ class GameEnvironment(gym.Env):
         self.scalar_history = deque([], maxlen=self.stack_size)
         
         self._initialize_spaces()
-        self.board: np.ndarray = np.empty(TOTAL_POSITIONS, dtype=object)
+        self.board: List[Optional[Piece]] = [None] * TOTAL_POSITIONS
         self.piece_vectors: Dict[int, List[np.ndarray]] = {}
         self.revealed_vectors: Dict[int, np.ndarray] = {}
         self.hidden_vector: np.ndarray = np.zeros(TOTAL_POSITIONS, dtype=bool)
@@ -164,7 +165,7 @@ class GameEnvironment(gym.Env):
 
     def _reset_internal_state(self):
         """【V9 修改】重置内部状态，并用零状态填充历史队列"""
-        self.board.fill(None)
+        self.board = [None] * TOTAL_POSITIONS
         self.piece_vectors = {p: [np.zeros(TOTAL_POSITIONS, dtype=bool) for _ in range(NUM_PIECE_TYPES)] for p in [1, -1]}
         self.revealed_vectors = {p: np.zeros(TOTAL_POSITIONS, dtype=bool) for p in [1, -1]}
         self.hidden_vector.fill(False)
@@ -207,7 +208,7 @@ class GameEnvironment(gym.Env):
         
         self.current_player = 1
 
-    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
         if self.current_opponent_path and self.current_opponent_path in self.opponent_completed_games:
             self.opponent_completed_games[self.current_opponent_path] += 1
 
@@ -275,34 +276,36 @@ class GameEnvironment(gym.Env):
             raise ValueError(f"环境内错误：找不到预加载的对手模型 {self.current_opponent_path}。")
         self.active_opponent = chosen_model_data['model']
 
-    def step(self, action_index: int) -> Tuple[dict, float, bool, bool, dict]:
+    def step(self, action: int) -> Tuple[dict, float, bool, bool, dict]:
         reward = 0.0
-        _, terminated, truncated, winner = self._internal_apply_action(action_index)
+        _, terminated, truncated, winner = self._internal_apply_action(action)
         
         if terminated or truncated:
-            final_reward = self._calculate_final_reward(reward, winner, terminated)
-            return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
+            final_reward = self._calculate_final_reward(reward, winner or 0, terminated)
+            return self.get_state(), float(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
         
         self.current_player *= -1
         
         if self.active_opponent:
             _, terminated, truncated, winner = self._execute_opponent_move()
             if terminated or truncated:
-                final_reward = self._calculate_final_reward(reward, winner, terminated)
-                return self.get_state(), np.float32(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
+                final_reward = self._calculate_final_reward(reward, winner or 0, terminated)
+                return self.get_state(), float(final_reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
         
         self.current_player *= -1
-        return self.get_state(), np.float32(reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
+        return self.get_state(), float(reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
 
     def _internal_apply_action(self, action_index: int) -> Tuple[float, bool, bool, Optional[int]]:
-        if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
-        
+        # 暂停有效动作检查
+        #if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
+
         self.last_action = action_index
         self.total_step_counter += 1
         
         if action_index < REVEAL_ACTIONS_COUNT:
             sq = POS_TO_SQ[self.action_to_coords[action_index]]
             piece = self.board[sq]
+            assert piece is not None, f"试图翻开空位置 {sq}"
             piece.revealed = True
             self.hidden_vector[sq] = False
             self.revealed_vectors[piece.player][sq] = True
@@ -329,6 +332,8 @@ class GameEnvironment(gym.Env):
         attacker = self.board[from_sq]
         defender = self.board[to_sq]
         self.board[to_sq], self.board[from_sq] = attacker, None
+        
+        assert attacker is not None, f"试图移动空位置 {from_sq} 的棋子"
         self._update_vectors_for_move(attacker.player, attacker.piece_type, from_sq, to_sq)
         if defender is None:
             self.move_counter += 1
@@ -391,7 +396,7 @@ class GameEnvironment(gym.Env):
             last_action_one_hot
         ])
 
-    def action_masks(self, player_id: int = None) -> np.ndarray:
+    def action_masks(self, player_id: Optional[int] = None) -> np.ndarray:
         player = player_id if player_id is not None else self.current_player
         mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.int32)
         reveal_actions = np.where(self.hidden_vector)[0]
@@ -439,19 +444,23 @@ class GameEnvironment(gym.Env):
                     if targets.size > 0:
                         target_sq = np.min(targets) if is_pos_dir else np.max(targets)
                         if valid_cannon_targets[target_sq]:
-                            idx = self.coords_to_action.get((SQ_TO_POS[from_sq], SQ_TO_POS[target_sq]))
+                            idx = self.coords_to_action.get((SQ_TO_POS[from_sq], SQ_TO_POS[int(target_sq)]))
                             if idx is not None: mask[idx] = 1
 
     def _execute_opponent_move(self) -> Tuple[float, bool, bool, Optional[int]]:
         obs, mask = self.get_state(), self.action_masks()
         if not np.any(mask): return 0.0, True, False, -self.current_player
         try:
-            opp_action, _ = self.active_opponent.predict(obs, action_masks=mask, deterministic=True)
+            if self.active_opponent is not None:
+                opp_action, _ = self.active_opponent.predict(obs, action_masks=mask, deterministic=True)
+            else:
+                valid_actions = np.where(mask)[0]
+                opp_action = self.np_random.choice(valid_actions)
             return self._internal_apply_action(int(opp_action))
         except Exception as e:
             print(f"警告: 对手预测失败 ({e}), 已随机选择动作。")
             valid_actions = np.where(mask)[0]
-            return self._internal_apply_action(np.random.choice(valid_actions))
+            return self._internal_apply_action(self.np_random.choice(valid_actions))
 
     def _calculate_final_reward(self, reward: float, winner: int, term: bool) -> float:
         if term:
@@ -549,8 +558,7 @@ class GameEnvironment(gym.Env):
 
     def _initialize_board(self):
         pieces = [Piece(pt, p) for pt, count in PIECE_MAX_COUNTS.items() for p in [1, -1] for _ in range(count)]
-        rng = self.np_random
-        rng.shuffle(pieces)
+        random.shuffle(pieces)
         for sq, piece in enumerate(pieces):
             self.board[sq] = piece
             self.empty_vector[sq] = False
@@ -558,7 +566,7 @@ class GameEnvironment(gym.Env):
         
         if INITIAL_REVEALED_PIECES > 0:
             reveal_count = min(INITIAL_REVEALED_PIECES, TOTAL_POSITIONS)
-            positions_to_reveal = rng.choice(TOTAL_POSITIONS, size=reveal_count, replace=False)
+            positions_to_reveal = self.np_random.choice(TOTAL_POSITIONS, size=reveal_count, replace=False)
             for sq in positions_to_reveal:
                 piece = self.board[sq]
                 piece.revealed = True

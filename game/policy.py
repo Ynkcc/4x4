@@ -2,7 +2,7 @@
 import gymnasium as gym
 import torch as th
 import torch.nn as nn
-from typing import Dict, Any
+from typing import Dict, Any, cast, Callable
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
@@ -63,14 +63,14 @@ class CustomNetwork(BaseFeaturesExtractor):
         
         # --- 1. CNN 分支 (处理棋盘) ---
         # 这行代码会自动获取堆叠后的通道数
-        in_channels = board_space.shape[0]
+        in_channels = board_space.shape[0]  # type: ignore
         self.cnn_head = nn.Conv2d(in_channels, num_hidden_channels, kernel_size=3, padding=1, bias=False)
         self.res_blocks = nn.ModuleList([ResidualBlock(num_hidden_channels) for _ in range(num_res_blocks)])
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         
         # --- 2. MLP 分支 (处理标量) ---
         # 这行代码会自动获取堆叠后的标量维度
-        scalar_input_dim = scalars_space.shape[0]
+        scalar_input_dim = scalars_space.shape[0]  # type: ignore
         self.scalar_encoder = nn.Sequential(
             nn.Linear(scalar_input_dim, 256),
             nn.LayerNorm(256),
@@ -113,7 +113,7 @@ class CustomActorCriticPolicy(MaskableActorCriticPolicy):
         self,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
-        lr_schedule: callable,
+        lr_schedule: Callable,
         *args: Any,
         **kwargs: Any,
     ):

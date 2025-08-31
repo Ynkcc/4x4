@@ -9,16 +9,16 @@ import numpy as np
 import sys
 
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecEnv
 from sb3_contrib import MaskablePPO
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from utils.constants import *
 from game.environment import GameEnvironment
 from game.policy import CustomActorCriticPolicy
 from training.evaluator import evaluate_models
 
-def create_new_ppo_model(env=None, tensorboard_log=None):
+def create_new_ppo_model(env, tensorboard_log=None):
     """
     创建一个全新的随机初始化的PPO模型。
     """
@@ -52,7 +52,7 @@ def create_new_ppo_model(env=None, tensorboard_log=None):
     )
     return model
 
-def load_ppo_model_with_hyperparams(model_path: str, env=None, tensorboard_log=None):
+def load_ppo_model_with_hyperparams(model_path: str, env, tensorboard_log=None):
     """
     加载PPO模型并应用自定义超参数。
     """
@@ -97,8 +97,8 @@ class SelfPlayTrainer:
     - 实现了更科学的历史模型保留和采样机制。
     """
     def __init__(self):
-        self.model = None
-        self.env = None
+        self.model: Optional[MaskablePPO] = None
+        self.env: Optional[VecEnv] = None
         self.tensorboard_log_run_path = None
         
         # --- 对手池核心属性 (新规则) ---
@@ -426,6 +426,8 @@ class SelfPlayTrainer:
 
     def _train_learner(self):
         """训练学习者模型（即挑战者）。"""
+        assert self.model is not None, "Model not initialized"
+        assert self.env is not None, "Environment not initialized"
         print(f"🏋️  阶段一: 挑战者进行 {STEPS_PER_LOOP:,} 步训练...")
         start_time = time.time()
         self.model.learn(total_timesteps=STEPS_PER_LOOP, reset_num_timesteps=False, progress_bar=PPO_SHOW_PROGRESS)
@@ -453,6 +455,8 @@ class SelfPlayTrainer:
         
     def _evaluate_and_update(self) -> bool:
         """评估、决策、更新Elo、轮换对手、同步环境的完整流程。"""
+        assert self.model is not None, "Model not initialized"
+        assert self.env is not None, "Environment not initialized"
         print(f"\n💾 阶段二: {os.path.basename(CHALLENGER_PATH)} 向 {os.path.basename(MAIN_OPPONENT_PATH)} 发起挑战")
         
         print(f"\n⚔️  阶段三: 启动镜像对局评估...")
@@ -494,6 +498,8 @@ class SelfPlayTrainer:
 
     def run(self):
         """启动并执行完整的自我对弈训练流程。"""
+        assert self.model is not None, "Model not initialized"
+        assert self.env is not None, "Environment not initialized"
         try:
             self._prepare_environment_and_models()
             print("\n--- [步骤 3/5] 开始Elo自我对弈主循环 ---")

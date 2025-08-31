@@ -46,7 +46,7 @@ def _play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_play
     
     # 获取初始观察状态
     obs = env.get_state()
-    
+
     while True:
         current_player_agent = red_player if env.current_player == 1 else black_player
         action_mask = env.action_masks()
@@ -58,8 +58,8 @@ def _play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_play
         _, terminated, truncated, winner = env._internal_apply_action(action)
         
         if terminated or truncated:
-            return winner
-        
+            return winner if winner is not None else 0
+
         env.current_player *= -1
         obs = env.get_state()
 

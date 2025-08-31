@@ -16,6 +16,7 @@ try:
     from scipy.ndimage import uniform_filter1d
     SCIPY_AVAILABLE = True
 except ImportError:
+    uniform_filter1d = None  # type: ignore
     SCIPY_AVAILABLE = False
 
 
@@ -83,7 +84,7 @@ def smooth_data(data, smoothing_window=1):
         return data
     
     if SCIPY_AVAILABLE:
-        return uniform_filter1d(data.astype(float), size=smoothing_window)
+        return uniform_filter1d(data.astype(float), size=smoothing_window)  # type: ignore
     else:
         # 使用numpy实现简单的移动平均
         if len(data) < smoothing_window:
