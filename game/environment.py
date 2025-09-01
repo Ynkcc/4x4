@@ -9,6 +9,7 @@ from gymnasium import spaces
 from typing import Optional, Any, List, Dict, Tuple
 import math
 from collections import deque
+import multiprocessing as mp # 【新增】导入multiprocessing
 
 # --- 【新增】导入调试和状态堆叠常量 ---
 from utils.constants import USE_FIXED_SEED_FOR_TRAINING, FIXED_SEED_VALUE, STATE_STACK_SIZE
@@ -80,25 +81,34 @@ class Piece:
 class GameEnvironment(gym.Env):
     """
     暗棋游戏环境，兼容Gymnasium接口，并为自我对弈训练进行了优化。
-    【V9 更新】: 实现了状态堆叠 (State Stacking) 功能。
+    【IPC版更新】: 实现了进程间通信进行对手预测，移除了内部模型加载。
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
     def __init__(self,
                  render_mode: Optional[str] = None,
-                 opponent_agent: Optional[Any] = None,
                  opponent_data: Optional[List[Dict[str, Any]]] = None,
-                 shaping_coef: float = 0.1):
+                 shaping_coef: float = 0.1,
+                 # --- 【新增】IPC 相关参数 ---
+                 prediction_q: Optional[mp.Queue] = None,
+                 result_q: Optional[mp.Queue] = None,
+                 worker_id: int = 0
+                 ):
         super().__init__()
         self.render_mode = render_mode
         self.shaping_coef = shaping_coef
         self.learning_player_id = 1
-        self.opponent_data = opponent_data if opponent_data else []
-        self.active_opponent = opponent_agent
         
-        # --- 【V9 修改】状态堆叠核心 ---
+        # --- 【修改】IPC 相关属性 ---
+        self.opponent_data = opponent_data if opponent_data else []
+        self.prediction_q = prediction_q
+        self.result_q = result_q
+        self.worker_id = worker_id
+        # active_opponent 不再存储模型实例
+        self.active_opponent = self.prediction_q is not None
+        
+        # --- 状态堆叠核心 ---
         self.stack_size = STATE_STACK_SIZE
-        # 使用deque可以自动管理历史记录的长度
         self.board_history = deque([], maxlen=self.stack_size)
         self.scalar_history = deque([], maxlen=self.stack_size)
         
@@ -131,11 +141,9 @@ class GameEnvironment(gym.Env):
 
     def _initialize_spaces(self):
         """【V9 修改】根据堆叠大小定义观察空间"""
-        # 原始单帧的维度
         num_channels_single = NUM_PIECE_TYPES * 2 + 2
         scalar_shape_single = (3 + 8 + 8 + 1 + ACTION_SPACE_SIZE,)
         
-        # 堆叠后的维度
         board_shape_stacked = (num_channels_single * self.stack_size, BOARD_ROWS, BOARD_COLS)
         scalar_shape_stacked = (scalar_shape_single[0] * self.stack_size,)
         
@@ -165,8 +173,6 @@ class GameEnvironment(gym.Env):
         self.survival_vectors = {p: np.ones(8, dtype=np.float32) for p in [1, -1]}
         self.last_action = -1
 
-        # --- 新增：填充历史状态 ---
-        # 创建一个代表游戏初始状态的“零”观察
         initial_board_state = self._get_board_state_tensor()
         initial_scalar_state = self._get_scalar_state_vector()
         
@@ -178,28 +184,26 @@ class GameEnvironment(gym.Env):
             self.scalar_history.append(initial_scalar_state.copy())
 
     def reload_opponent_pool(self, new_opponent_data: List[Dict[str, Any]]):
+        """【IPC版】当主进程更新对手池时，此方法被调用以接收新的对手数据（路径和权重）。"""
         self.opponent_data = new_opponent_data
-        self.opponent_weights = {}
+        # 权重相关逻辑在 _select_active_opponent 中处理，这里只需更新数据源
+        self.opponent_weights = {} # 强制在下次选择时重新计算
+        print(f"[Env {self.worker_id}] 对手池已更新，共 {len(self.opponent_data)} 个对手。")
         return True
 
     def _internal_reset(self, seed: Optional[int] = None):
         if USE_FIXED_SEED_FOR_TRAINING:
             seed = FIXED_SEED_VALUE
         super().reset(seed=seed)
-        self._reset_internal_state() # 重置并填充历史
+        self._reset_internal_state() 
         self._initialize_board()
-        
-        # 【V9 新增】初始化后，用真实的初始状态更新历史记录
-        # 这一步很重要，因为它反映了随机翻开的棋子
         self._update_history()
-        
         self.current_player = 1
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[dict, dict]:
         if self.current_opponent_path and self.current_opponent_path in self.opponent_completed_games:
             self.opponent_completed_games[self.current_opponent_path] += 1
 
-        # 【V9 修改】调用 internal_reset，它现在会处理历史队列
         self._internal_reset(seed=seed) 
 
         self._select_active_opponent()
@@ -207,6 +211,7 @@ class GameEnvironment(gym.Env):
         self._first_player_alternator *= -1
 
         if self.active_opponent and self.current_player != self.learning_player_id:
+            # 【修改】执行对手移动现在是异步的，但step API是同步的，所以内部处理
             self._execute_opponent_move()
             self.current_player *= -1
 
@@ -214,9 +219,12 @@ class GameEnvironment(gym.Env):
         return self.get_state(), info
 
     def _select_active_opponent(self):
+        """【IPC版】选择对手时，只操作路径和权重，不再关心模型实例。"""
         if not self.opponent_data:
-            self.active_opponent = None
+            self.active_opponent = False
             return
+        
+        self.active_opponent = True # 只要有数据，就认为有对手
 
         current_weights = {item['path']: item['weight'] for item in self.opponent_data}
         if self.opponent_weights != current_weights:
@@ -254,14 +262,12 @@ class GameEnvironment(gym.Env):
             if self.opponent_data:
                 next_opponent_path = self.opponent_data[0]['path']
             else:
-                self.active_opponent = None
+                self.active_opponent = False
                 return
 
         self.current_opponent_path = next_opponent_path
-        chosen_model_data = next((item for item in self.opponent_data if item['path'] == self.current_opponent_path), None)
-        if chosen_model_data is None:
-            raise ValueError(f"环境内错误：找不到预加载的对手模型 {self.current_opponent_path}。")
-        self.active_opponent = chosen_model_data['model']
+        # 不再需要加载模型，只需记录路径
+        # chosen_model_data = next((item for item in self.opponent_data if item['path'] == self.current_opponent_path), None)
 
     def step(self, action: int) -> Tuple[dict, float, bool, bool, dict]:
         reward = 0.0
@@ -283,9 +289,6 @@ class GameEnvironment(gym.Env):
         return self.get_state(), float(reward), terminated, truncated, {'winner': winner, 'action_mask': self.action_masks()}
 
     def _internal_apply_action(self, action_index: int) -> Tuple[float, bool, bool, Optional[int]]:
-        # 暂时禁用动作掩码检查
-        #if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
-        
         self.last_action = action_index
         self.total_step_counter += 1
         
@@ -302,7 +305,6 @@ class GameEnvironment(gym.Env):
             from_sq, to_sq = POS_TO_SQ[self.action_to_coords[action_index][0]], POS_TO_SQ[self.action_to_coords[action_index][1]]
             self._apply_move_action(from_sq, to_sq)
         
-        # 【V9 修改】在检查游戏结束前更新历史
         self._update_history()
         
         terminated, truncated, winner = self._check_game_over_conditions()
@@ -348,9 +350,7 @@ class GameEnvironment(gym.Env):
 
     def get_state(self) -> Dict[str, np.ndarray]:
         """【V9 修改】从历史队列拼接并返回最终的堆叠状态"""
-        # 沿通道轴（axis=0）拼接棋盘历史
         stacked_board = np.concatenate(list(self.board_history), axis=0).astype(np.float32)
-        # 展平并拼接标量历史
         stacked_scalars = np.concatenate(list(self.scalar_history), axis=0).astype(np.float32)
         return {"board": stacked_board, "scalars": stacked_scalars}
 
@@ -435,19 +435,40 @@ class GameEnvironment(gym.Env):
                             if idx is not None: mask[idx] = 1
 
     def _execute_opponent_move(self) -> Tuple[float, bool, bool, Optional[int]]:
+        """【IPC版】通过队列请求预测，而不是在本地执行。"""
         obs, mask = self.get_state(), self.action_masks()
-        if not np.any(mask): return 0.0, True, False, -self.current_player
-        try:
-            if self.active_opponent is not None:
-                opp_action, _ = self.active_opponent.predict(obs, action_masks=mask, deterministic=True)
-            else:
+        if not np.any(mask): 
+            return 0.0, True, False, -self.current_player
+
+        if self.prediction_q and self.result_q and self.current_opponent_path:
+            try:
+                # 1. 发送预测请求
+                request = (self.worker_id, self.current_opponent_path, obs, mask)
+                self.prediction_q.put(request)
+                
+                # 2. 阻塞等待预测结果
+                # 在多进程环境中，每个worker需要从结果队列中找到属于自己的结果
+                while True:
+                    worker_id, action = self.result_q.get()
+                    if worker_id == self.worker_id:
+                        opp_action = action
+                        break
+                    else:
+                        # 这不应该发生，除非队列设计有问题，但作为安全措施
+                        self.result_q.put((worker_id, action))
+                
+                return self._internal_apply_action(int(opp_action))
+
+            except Exception as e:
+                print(f"[Env {self.worker_id}] 警告: 对手预测请求失败 ({e}), 已随机选择动作。")
                 valid_actions = np.where(mask)[0]
-                opp_action = self.np_random.choice(valid_actions)
-            return self._internal_apply_action(int(opp_action))
-        except Exception as e:
-            print(f"警告: 对手预测失败 ({e}), 已随机选择动作。")
+                return self._internal_apply_action(self.np_random.choice(valid_actions))
+        else:
+            # Fallback: 如果没有IPC队列（例如在单机调试时），则执行随机动作
             valid_actions = np.where(mask)[0]
-            return self._internal_apply_action(self.np_random.choice(valid_actions))
+            opp_action = self.np_random.choice(valid_actions)
+            return self._internal_apply_action(int(opp_action))
+
 
     def _calculate_final_reward(self, reward: float, winner: int, term: bool) -> float:
         if term:
