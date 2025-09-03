@@ -195,14 +195,12 @@ class DarkChessEnv(gym.Env):
         """
         执行一步动作。此方法只处理当前玩家的动作，不处理对手逻辑。
         """
-        _, terminated, truncated, winner = self._internal_apply_action(action)
-        reward = 0.0
+        reward, terminated, truncated, winner = self._internal_apply_action(action)
         info = {'winner': winner, 'action_mask': self.action_masks()}
         return self.get_state(), reward, terminated, truncated, info
 
     def _internal_apply_action(self, action_index: int) -> Tuple[float, bool, bool, Optional[int]]:
         """应用一个动作并更新游戏状态，返回结果。"""
-        # 暂停有效动作检查
         #if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
 
         self.last_action = action_index
@@ -222,6 +220,9 @@ class DarkChessEnv(gym.Env):
             from_sq, to_sq = POS_TO_SQ[self.action_to_coords[action_index][0]], POS_TO_SQ[self.action_to_coords[action_index][1]]
             shaping_reward = self._apply_move_action(from_sq, to_sq)
         
+        # 切换玩家
+        self.current_player *= -1
+
         self._update_history()
         terminated, truncated, winner = self._check_game_over_conditions()
         return shaping_reward, terminated, truncated, winner
@@ -251,6 +252,7 @@ class DarkChessEnv(gym.Env):
             self.move_counter = 0
             points = PIECE_VALUES[defender.piece_type]
             if defender.player == attacker.player:
+                # 惩罚吃己方棋子的行为
                 self.scores[-attacker.player] += points
                 return -points / WINNING_SCORE
             else:
@@ -261,6 +263,7 @@ class DarkChessEnv(gym.Env):
         """检查游戏是否结束。"""
         if self.scores[1] >= WINNING_SCORE: return True, False, 1
         if self.scores[-1] >= WINNING_SCORE: return True, False, -1
+        # 检查的是对手是否有棋可走
         if not np.any(self.action_masks(-self.current_player)): return True, False, self.current_player
         if self.move_counter >= MAX_CONSECUTIVE_MOVES_FOR_DRAW: return True, False, 0
         if self.total_step_counter >= MAX_STEPS_PER_EPISODE: return False, True, 0

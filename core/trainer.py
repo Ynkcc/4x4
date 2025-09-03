@@ -1,128 +1,118 @@
 # rllib_version_complete/core/trainer.py
 
 import os
-import shutil
-import torch
-import numpy as np
+import random
+import ray
 from ray import tune
-from ray.air import RunConfig, CheckpointConfig
 from ray.rllib.algorithms.ppo import PPOConfig
-from ray.rllib.policy.policy import PolicySpec
 from ray.rllib.models import ModelCatalog
-from ray.tune.registry import register_env
-from typing import Dict, Any, Optional
+from ray.tune.stopper import MaximumIterationStopper
+from ray.air import RunConfig, CheckpointConfig
+
 
 from core.multi_agent_env import RLLibMultiAgentEnv
-from core.policy import RLLibCustomNetwork
 from callbacks.self_play_callback import SelfPlayCallback
+from core.custom_model import CustomDarkChessModel
 from utils.constants import *
 
 class RLLibSelfPlayTrainer:
     """
-    使用 Ray RLlib 的自我对弈训练器 (重构版)。
-    职责: 仅负责配置和启动训练任务。所有动态逻辑移至 Callback。
+    使用 RLlib PPO 进行自我对弈训练的主类 (重构版)。
     """
     def __init__(self):
-        self._setup_directories()
-
-    def _setup_directories(self):
-        """创建所有必要的目录。"""
-        os.makedirs(SELF_PLAY_OUTPUT_DIR, exist_ok=True)
-        os.makedirs(OPPONENT_POOL_DIR, exist_ok=True)
-        os.makedirs(TENSORBOARD_LOG_PATH, exist_ok=True)
-
-    def run(self):
-        """执行完整的训练流程。"""
         print("--- [步骤 1/3] 初始化环境和模型 ---")
-        
-        ModelCatalog.register_custom_model("custom_torch_model", RLLibCustomNetwork)
-        register_env("dark_chess_multi_agent", lambda config: RLLibMultiAgentEnv(config))
+        self._register_env_and_model()
 
         print("--- [步骤 2/3] 配置 PPO 算法 ---")
-        
-        # 初始策略定义：只有主策略。对手策略将由 Callback 动态加载和管理。
-        policies = {MAIN_POLICY_ID: PolicySpec()}
+        self.algo_config = self._build_algorithm_config()
 
-        # policy_mapping_fn 从 worker 获取最新的采样分布，而不是依赖 trainer
-        # 这使得对手选择更加动态和分布式
+    def _register_env_and_model(self):
+        """注册自定义环境和模型。"""
+        # 注册自定义环境
+        tune.register_env("dark_chess_multi_agent", lambda config: RLLibMultiAgentEnv(config))
+
+        # 注册自定义模型
+        ModelCatalog.register_custom_model("custom_dark_chess_model", CustomDarkChessModel)
+
+    def _build_algorithm_config(self) -> PPOConfig:
+        """构建并返回 PPO 算法的配置对象。"""
+        # 定义策略映射函数
         def policy_mapping_fn(agent_id, episode, worker, **kwargs):
-            # 在 worker 初始化后，callback 会为其注入 sampler_dist
-            dist = getattr(worker, "sampler_dist", {MAIN_POLICY_ID: 1.0})
-
-            if agent_id == "player1":
+            if episode.last_info_for(agent_id).get('policy_id') == MAIN_POLICY_ID:
                 return MAIN_POLICY_ID
-            else: # player2
-                policies = list(dist.keys())
-                probabilities = list(dist.values())
-                if not policies or sum(probabilities) == 0:
-                    return MAIN_POLICY_ID # 备用方案
-                return np.random.choice(policies, p=probabilities)
-        
-        is_cuda = PPO_DEVICE == 'cuda'
-        
-        # 根据设备（CPU/GPU）设置学习器（Learner）配置
-        if is_cuda:
-            # 使用1个 Learner，并为该 Learner 分配1个 GPU
-            learner_config = {"num_learners": 1, "num_gpus_per_learner": 1}
-        else:
-            # num_learners=0 表示在主进程上使用本地学习器，不分配GPU
-            learner_config = {"num_learners": 0, "num_gpus_per_learner": 0}
+            
+            # 使用 callback 中注入的采样分布来选择对手
+            dist = getattr(worker, 'sampler_dist', {MAIN_POLICY_ID: 1.0})
+            opponent_policy_id = random.choices(list(dist.keys()), list(dist.values()), k=1)[0]
+            return opponent_policy_id
 
+        # --- [API变更] ---
+        # 使用新的 .env_runners() API 替代旧的 .rollouts()
+        # 将 .training() 中的参数直接设置到 config 对象上
         config = (
             PPOConfig()
-            .environment("dark_chess_multi_agent")
-            .framework("torch")
-            .env_runners(num_env_runners=N_ENVS, rollout_fragment_length="auto")
-            # 新版API：使用 .learners() 配置计算资源，取代旧的 .resources(num_gpus=...)
-            .learners(**learner_config)
-            # 新版API：训练相关的配置
-            .training(
-                # model 配置已从 .training() 中移除，并移至 .rl_module()
-                lr=INITIAL_LR,
-                clip_param=PPO_CLIP_RANGE,
-                # 新版API：应使用 train_batch_size_per_learner
-                train_batch_size_per_learner=PPO_N_STEPS * N_ENVS,
-                minibatch_size=PPO_BATCH_SIZE,
-                num_epochs=PPO_N_EPOCHS,
-                lambda_=PPO_GAE_LAMBDA,
-                vf_loss_coeff=PPO_VF_COEF,
-                entropy_coeff=PPO_ENT_COEF,
+            .environment(
+                "dark_chess_multi_agent",
+                env_config={},
+                disable_env_checking=True
             )
-            # 新版API：使用 .rl_module() 配置神经网络模型
-            # 修复 DeprecationWarning：使用 model_config 替代 model_config_dict
-            .rl_module(
-                model_config={"custom_model": "custom_torch_model"}
+            .framework("torch")
+            # 变更点 1: rollouts() -> env_runners()
+            # num_rollout_workers -> num_env_runners
+            .env_runners(
+                num_env_runners=NUM_WORKERS,
+                rollout_fragment_length="auto"
+            )
+            # 变更点 2: .training() 中的模型和训练超参数直接在 config 上设置
+            .training(
+                model={
+                    "custom_model": "custom_dark_chess_model",
+                    "vf_share_layers": True,
+                },
+                lambda_=0.95,
+                kl_coeff=0.5,
+                clip_param=0.2,
+                vf_clip_param=10.0,
+                entropy_coeff=0.01,
+                train_batch_size=TRAIN_BATCH_SIZE,
+                sgd_minibatch_size=SGD_MINIBATCH_SIZE,
+                num_sgd_iter=NUM_SGD_ITER,
+                lr=LEARNING_RATE,
             )
             .multi_agent(
-                policies=policies,
+                policies={MAIN_POLICY_ID}, # 一开始只有主策略
                 policy_mapping_fn=policy_mapping_fn,
                 policies_to_train=[MAIN_POLICY_ID],
             )
             .callbacks(SelfPlayCallback)
-            # 明确启用新的 API Stack (RLModule 和 Learner)，这是当前默认且推荐的方式
-            .api_stack(enable_rl_module_and_learner=True)
+            .resources(
+                num_gpus=NUM_GPUS,
+                num_gpus_per_worker=NUM_GPUS_PER_WORKER,
+            )
         )
+        return config
 
-        # 使用 tune.Tuner 可以更优雅地处理检查点和恢复
+    def run(self):
+        """
+        运行训练过程，包括启动、训练和可选的模型恢复。
+        """
+        # --- [API变更] ---
+        # ray.air.RunConfig 和 ray.air.CheckpointConfig 的使用方式保持不变，但为了代码清晰，
+        # 在文件头部明确导入。
         tuner = tune.Tuner(
             "PPO",
+            param_space=self.algo_config.to_dict(),
             run_config=RunConfig(
-                stop={"training_iteration": TOTAL_TRAINING_LOOPS},
+                name="PPO_self_play_experiment",
+                stop=MaximumIterationStopper(max_iter=TRAINING_ITERATIONS),
                 checkpoint_config=CheckpointConfig(
-                    checkpoint_frequency=1, 
-                    checkpoint_at_end=True,
-                    num_to_keep=3, # 保留最近3个检查点
+                    checkpoint_frequency=CHECKPOINT_FREQ,
+                    checkpoint_at_end=True
                 ),
-                storage_path=TENSORBOARD_LOG_PATH,
-                name="PPO_self_play_experiment"
+                local_dir=TENSORBOARD_LOG_DIR,
             ),
-            param_space=config.to_dict(),
         )
         
-        # tuner.fit() 会自动处理恢复逻辑
         results = tuner.fit()
-        
-        print("\n--- [步骤 3/3] 训练完成！ ---")
-        best_checkpoint = results.get_best_result(metric="episode_reward_mean", mode="max").checkpoint
-        if best_checkpoint:
-            print(f"最佳检查点位于: {best_checkpoint.path}")
+        print("--- [步骤 3/3] 训练完成！ ---")
+        return results

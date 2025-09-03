@@ -4,106 +4,104 @@ import os
 import torch
 
 # ==============================================================================
-# --- 1. 路径与目录配置 (通常固定不变) ---
+# --- 1. 核心路径与目录配置 ---
 # ==============================================================================
 # 项目根目录
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 训练输出的主目录
+# 训练输出的主目录 (所有模型、日志和评估结果都将保存在这里)
 SELF_PLAY_OUTPUT_DIR = os.path.join(ROOT_DIR, "models", "self_play_final")
 
-# 对手池专用目录
+# 对手模型池目录 (由回调函数管理)
 OPPONENT_POOL_DIR = os.path.join(SELF_PLAY_OUTPUT_DIR, "opponent_pool")
 
-# 核心模型文件路径
-MAIN_OPPONENT_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "main_opponent.zip")
-CHALLENGER_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "challenger.zip")
-FINAL_MODEL_PATH = os.path.join(SELF_PLAY_OUTPUT_DIR, "final_model.zip")
-
-# TensorBoard 日志路径
-TENSORBOARD_LOG_PATH = os.path.join(ROOT_DIR, "tensorboard_logs", "self_play_final")
+# TensorBoard 日志路径 (Ray Tune 会在此目录下创建实验文件夹)
+TENSORBOARD_LOG_DIR = SELF_PLAY_OUTPUT_DIR
 
 
 # ==============================================================================
-# --- 2. 游戏环境超参数 (可调优) ---
+# --- 2. RLlib 训练与环境配置 ---
 # ==============================================================================
-# 奖励塑形(Reward Shaping)系数的初始值，用于引导模型学习
-SHAPING_COEF_INITIAL = 0.001
-# 奖励塑形系数衰减后的最终值
-SHAPING_COEF_FINAL = 0
-# 奖励塑形系数衰减完成所需的训练循环次数
-SHAPING_DECAY_END_LOOP = 0
+# 训练总迭代次数 (一次 `algo.train()` 算一次迭代)
+TRAINING_ITERATIONS = 1000
 
+# Ray Rollout Workers 的数量 (并行环境的数量)
+NUM_WORKERS = 4  # 根据你的 CPU 核心数调整, 推荐为 CPU核心数 - 1
+
+# 使用的 GPU 数量 (主训练器使用)
+NUM_GPUS = 1 if torch.cuda.is_available() else 0
+
+# 每个 Worker 使用的 GPU 数量 (设为 0 表示 Worker 使用 CPU)
+NUM_GPUS_PER_WORKER = 0
 
 # ==============================================================================
-# --- 3. PPO 算法超参数 (主要调优目标) ---
+# --- 3. PPO 算法超参数 (RLlib Config) ---
 # ==============================================================================
 # 学习率
-INITIAL_LR = 1e-4
-# PPO 裁剪范围 (Clip Range)
-PPO_CLIP_RANGE = 0.2
-# 每次更新前，每个环境收集的步数
-PPO_N_STEPS = 512
-# 训练时每个 mini-batch 的大小
-PPO_BATCH_SIZE = 512
-# 每次更新时，对采集到的数据进行优化的轮数
-PPO_N_EPOCHS = 20
-# GAE (Generalized Advantage Estimation) 的 lambda 参数
-PPO_GAE_LAMBDA = 0.95
-# 价值函数损失的权重系数
-PPO_VF_COEF = 0.5
-# 熵损失的权重系数，用于鼓励探索
-PPO_ENT_COEF = 0.01
-# 设备选择: 'cuda' 或 'cpu'
-PPO_DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+LEARNING_RATE = 1e-4
+
+# 训练批次大小 (所有 Worker 收集的数据总和)
+TRAIN_BATCH_SIZE = 4096
+
+# SGD (随机梯度下降) 的 mini-batch 大小
+SGD_MINIBATCH_SIZE = 256
+
+# 每次训练迭代中，对采集到的数据进行优化的轮数
+NUM_SGD_ITER = 20
+
+# 熵系数，鼓励探索
+ENTROPY_COEFF = 0.01
+
+# PPO 裁剪参数
+CLIP_PARAM = 0.2
 
 
 # ==============================================================================
-# --- 4. 自我对弈超参数 (核心调优目标) ---
+# --- 4. 自我对弈与评估超参数 ---
 # ==============================================================================
-# 总训练循环次数
-TOTAL_TRAINING_LOOPS = 100
-# 评估游戏局数 (每轮训练后进行评估)
+# 每轮评估需要的游戏总局数
 EVALUATION_GAMES = 100
-# 晋级阈值 (胜率超过此值则晋级)
+
+# 挑战者晋级为新对手的胜率阈值
 EVALUATION_THRESHOLD = 0.55
-# Elo 评分相关
-ELO_DEFAULT = 1500  # 默认Elo评分
-ELO_K_FACTOR = 32   # Elo K因子
-ELO_WEIGHT_TEMPERATURE = 1.0  # 对手采样温度参数
-# 主策略ID
+
+# 默认 Elo 评分
+ELO_DEFAULT = 1500
+
+# Elo K因子 (影响Elo评分变化的幅度)
+ELO_K_FACTOR = 32
+
+# 对手采样温度参数 (值越小，越倾向于选择 Elo 相近的对手)
+ELO_WEIGHT_TEMPERATURE = 100.0
+
+# RLlib 策略字典中的主策略 ID
 MAIN_POLICY_ID = "main_policy"
-# 对手策略ID前缀
+
+# RLlib 策略字典中的对手策略 ID 前缀
 OPPONENT_POLICY_ID_PREFIX = "opponent_"
-# 环境数量
-N_ENVS = 4
+
+# 检查点保存频率 (每 N 次迭代保存一次)
+CHECKPOINT_FREQ = 20
 
 
 # ==============================================================================
-# --- 5. 网络架构超参数 (可调优) ---
+# --- 5. 对手池大小配置 ---
 # ==============================================================================
-# 残差块数量
-NETWORK_NUM_RES_BLOCKS = 4
-# 隐藏通道数
-NETWORK_NUM_HIDDEN_CHANNELS = 128
-# 标量编码器输出维度
-SCALAR_ENCODER_OUTPUT_DIM = 64
+# 长期对手池大小 (保存具有里程碑意义的模型)
+LONG_TERM_POOL_SIZE = 5
+
+# 短期对手池大小 (保存最近生成的模型)
+SHORT_TERM_POOL_SIZE = 10
 
 
 # ==============================================================================
-# --- 6. 调试与开发相关 ---
+# --- 6. 环境与调试相关 ---
 # ==============================================================================
-# 是否使用固定种子进行训练 (用于重现结果)
-USE_FIXED_SEED_FOR_TRAINING = False
-# 固定种子值
-FIXED_SEED_VALUE = 42
-# 状态堆叠大小
+# 状态堆叠大小 (模型会看到过去 N 帧的状态)
 STATE_STACK_SIZE = 4
 
-# ==============================================================================
-# --- 7. 对手池大小配置 ---
-# ==============================================================================
-# 长期对手池大小
-LONG_TERM_POOL_SIZE = 5
-# 短期对手池大小
-SHORT_TERM_POOL_SIZE = 10
+# 是否在训练时使用固定的随机种子 (用于复现实验)
+USE_FIXED_SEED_FOR_TRAINING = False
+
+# 固定的种子值
+FIXED_SEED_VALUE = 42
