@@ -130,9 +130,25 @@ class RLLibCustomNetwork(TorchModelV2, nn.Module):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
-        # 假设观察空间是 Dict 空间
-        board_shape = obs_space["board"].shape
-        scalar_shape = obs_space["scalars"].shape
+        # 检查观察空间是否被展平了
+        if hasattr(obs_space, 'spaces') and 'board' in obs_space.spaces:
+            # 原始的 Dict 观察空间
+            board_shape = obs_space["board"].shape
+            scalar_shape = obs_space["scalars"].shape
+            self.use_flattened_obs = False
+        else:
+            # 展平的观察空间
+            print(f"检测到展平的观察空间: {obs_space}")
+            # 根据我们已知的维度计算
+            board_channels = 48  # NUM_PIECE_TYPES * 2 + 2) * stack_size
+            board_size = 4 * 4  # BOARD_ROWS * BOARD_COLS
+            board_flat_size = board_channels * board_size  # 768
+            scalar_size = obs_space.shape[0] - board_flat_size  # 1296 - 768 = 528
+            
+            board_shape = (board_channels, 4, 4)
+            scalar_shape = (scalar_size,)
+            self.use_flattened_obs = True
+            self.board_flat_size = board_flat_size
 
         # 棋盘处理分支
         self.board_conv = nn.Sequential(
@@ -164,8 +180,26 @@ class RLLibCustomNetwork(TorchModelV2, nn.Module):
         self.value_head = SlimFC(features_dim, 1)
 
     def forward(self, input_dict, state, seq_lens):
-        board_obs = input_dict["obs"]["board"]
-        scalar_obs = input_dict["obs"]["scalars"]
+        obs = input_dict["obs"]
+        
+        # 检查观察的实际结构
+        if isinstance(obs, dict):
+            # 如果是字典，直接使用原始结构
+            if "board" in obs and "scalars" in obs:
+                board_obs = obs["board"]
+                scalar_obs = obs["scalars"]
+            else:
+                # 查看字典的内容来调试
+                print(f"调试：观察字典键 = {list(obs.keys())}")
+                raise ValueError(f"观察字典不包含预期的键。实际键: {list(obs.keys())}")
+        elif hasattr(obs, 'shape') and len(obs.shape) >= 2:
+            # 如果是张量且被展平了
+            board_obs = obs[:, :self.board_flat_size].reshape(-1, 48, 4, 4)
+            scalar_obs = obs[:, self.board_flat_size:]
+        else:
+            print(f"调试：不支持的观察类型 = {type(obs)}")
+            print(f"调试：观察内容 = {obs}")
+            raise ValueError(f"不支持的观察类型: {type(obs)}")
 
         # 处理棋盘
         board_features = self.board_conv(board_obs)
@@ -181,11 +215,14 @@ class RLLibCustomNetwork(TorchModelV2, nn.Module):
 
         # 价值输出
         value = self.value_head(features).squeeze(-1)
+        
+        # 保存价值输出供value_function方法使用
+        self._value_out = value
 
         return logits, state
 
     def value_function(self):
-        return self.value_head_output
+        return self._value_out
 
     def custom_loss(self, policy_loss, vf_loss):
         return policy_loss + vf_loss

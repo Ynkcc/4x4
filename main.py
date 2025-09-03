@@ -4,6 +4,12 @@ import os
 # 将项目根目录添加到Python路径中，以确保可以正确导入其他模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 设置标准输出编码为UTF-8（解决Windows下的编码问题）
+if sys.platform == "win32":
+    import codecs
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
+
 from core.trainer import RLLibSelfPlayTrainer
 
 def main():

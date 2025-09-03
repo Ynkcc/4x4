@@ -97,16 +97,16 @@ class RLLibSelfPlayTrainer:
             PPOConfig()
             .environment("dark_chess_multi_agent")
             .framework("torch")
-            .rollouts(num_rollout_workers=N_ENVS, rollout_fragment_length="auto")
+            .env_runners(num_env_runners=N_ENVS, rollout_fragment_length="auto")
             .training(
                 model={"custom_model": "custom_torch_model"},
                 lr=INITIAL_LR,
                 clip_param=PPO_CLIP_RANGE,
                 train_batch_size=PPO_N_STEPS * N_ENVS,
-                sgd_minibatch_size=PPO_BATCH_SIZE,
-                num_sgd_iter=PPO_N_EPOCHS,
+                minibatch_size=PPO_BATCH_SIZE,
+                num_epochs=PPO_N_EPOCHS,
                 lambda_=PPO_GAE_LAMBDA,
-                vf_coef=PPO_VF_COEF,
+                vf_loss_coeff=PPO_VF_COEF,
                 entropy_coeff=PPO_ENT_COEF,
             )
             .multi_agent(
@@ -116,6 +116,7 @@ class RLLibSelfPlayTrainer:
             )
             .resources(num_gpus=1 if PPO_DEVICE == 'cuda' else 0)
             .callbacks(SelfPlayCallback) # 使用类引用
+            .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
         )
 
         latest_checkpoint = self._find_latest_checkpoint(TENSORBOARD_LOG_PATH)
