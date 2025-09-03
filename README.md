@@ -1,47 +1,86 @@
-# 暗棋强化学习训练框架
+# 暗棋强化学习 Elo 自我对弈训练框架 (RLlib版)
 
-一个基于强化学习的4x4暗棋训练项目，包含Elo自我对弈训练、持续学习、人机对战和可视化分析等完整功能。
+这是一个使用 Ray RLlib 框架实现的4x4自定义暗棋游戏自我对弈训练系统。
+
+## 主要特性
+
+- 使用 RLlib 的多智能体环境支持
+- Elo 评分系统
+- 动态对手池管理
+- 自我对弈训练
+- 支持人机对战
+- 模型评估工具
+
+## 快速开始
+
+1. 安装依赖：
+   ```bash
+   pip install "ray[rllib]" torch gymnasium
+   ```
+
+2. 运行训练：
+   ```bash
+   python main.py
+   ```
+
+3. 人机对战：
+   ```bash
+   python scripts/human_vs_ai.py
+   ```
+
+4. 模型评估：
+   ```bash
+   python scripts/evaluate.py
+   ```
 
 ## 项目结构
 
 ```
-gym/
-├── main.py                     # Elo自我对弈训练主入口
-├── continuous_training.py      # 持续训练脚本
-├── human_vs_ai.py             # 人机对战GUI界面
-├── export_plots.py            # 训练数据可视化导出
-├── README.md                   # 项目说明文档
-├── game/                       # 游戏核心模块
+./
+├── main.py                     # 🚀 新的主入口，启动训练
+├── README.md                   # 📖 项目说明文档
+├── core/                       # 核心模块
 │   ├── __init__.py
-│   ├── environment.py          # 暗棋游戏环境(Gymnasium兼容)
-│   └── policy.py               # 自定义CNN策略网络
-├── training/                   # 训练相关模块
+│   ├── environment.py          # 原始游戏环境
+│   ├── multi_agent_env.py      # RLlib多智能体环境的封装
+│   ├── policy.py               # RLlib自定义策略网络
+│   └── trainer.py              # 核心训练器类 RLLibSelfPlayTrainer
+├── callbacks/                  # 回调模块
 │   ├── __init__.py
-│   ├── evaluator.py            # 模型评估器
-│   ├── simple_agent.py         # 简单规则代理
-│   └── trainer.py              # Elo自我对弈训练器
+│   └── self_play_callback.py   # 自我对弈核心逻辑的回调实现
 ├── utils/                      # 工具模块
 │   ├── __init__.py
-│   ├── constants.py            # 全局配置和常量
-│   ├── model_compatibility.py  # 模型兼容性处理
-│   └── scheduler.py            # 学习率调度器
-├── models/                     # 模型存储目录
-│   ├── train_simple.zip        # 基础训练模型
-│   ├── train_simple_v2.zip     # 改进版基础模型
-│   ├── continuous_train/       # 持续训练模型
-│   │   ├── current_model.zip   # 当前训练模型
-│   │   ├── backup_model.zip    # 备份模型
-│   │   └── best_model_session_*.zip  # 各阶段最佳模型
-│   └── self_play_final/        # Elo自我对弈最终模型
-│       ├── main_opponent.zip   # 主要对手模型
-│       └── challenger.zip      # 挑战者模型
-├── tensorboard_logs/           # TensorBoard日志
-│   └── self_play_final/        # 训练监控日志
-└── training_plots/            # 训练图表
-    ├── rollout_ep_*.png        # 回合统计图表
-    ├── train_*.png             # 训练损失图表
-    └── time_fps.png            # 性能监控图表
+│   ├── constants.py            # 全局常量与超参数
+│   └── elo.py                  # Elo评分管理的工具函数
+└── scripts/                    # 其他可执行脚本
+    ├── __init__.py
+    ├── evaluate.py             # 评估两个模型表现的脚本
+    └── human_vs_ai.py          # 人机对战脚本
 ```
+
+## 配置说明
+
+主要配置参数位于 `utils/constants.py` 中，包括：
+
+- PPO算法超参数
+- 自我对弈参数
+- Elo评分系统配置
+- 网络架构参数
+
+## 训练流程
+
+1. 初始化Ray和环境
+2. 配置PPO算法
+3. 开始自我对弈主循环
+4. 每轮训练后进行评估和Elo更新
+5. 满足条件时将主策略加入对手池
+
+## 模型保存
+
+- 检查点保存在 `tensorboard_logs/self_play_final/`
+- 对手池模型保存在 `models/self_play_final/opponent_pool/`
+- Elo评分保存在 `models/self_play_final/elo_ratings.json`
+
 
 
 ## 游戏规则
@@ -63,6 +102,14 @@ gym/
 | 象      | 10分 | 1个       | ELEPHANT |
 | 士      | 20分 | 1个       | ADVISOR |
 | 将      | 30分 | 1个       | GENERAL |
+
+#### 该分支为进一步简化版本
+
+游戏包含5种不同的棋子，每种棋子都有特定的价值和数量：
+
+| 棋子类型 | 价值 | 数量(每方) | 英文名 |
+|---------|------|-----------|--------|
+
 
 **胜利条件**：率先获得60分的玩家获胜。
 

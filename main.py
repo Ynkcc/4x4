@@ -1,38 +1,33 @@
-# main.py
-
+import sys
 import os
-import warnings
 
-# 禁用TensorFlow警告
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 禁用INFO和WARNING日志
-warnings.filterwarnings('ignore', category=UserWarning, module='google.protobuf')
+# 将项目根目录添加到Python路径中，以确保可以正确导入其他模块
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 【移除】不再需要设置模型兼容性
-
-from training.trainer import SelfPlayTrainer
+from core.trainer import RLLibSelfPlayTrainer
 
 def main():
     """
     项目主入口函数。
     """
-    print("=================================================")
-    print("      欢迎使用暗棋强化学习 Elo 自我对弈训练框架      ")
-    print("=================================================")
-    
+    print("=" * 70)
+    print("      欢迎使用暗棋强化学习 Elo 自我对弈训练框架 (RLlib版)      ")
+    print("=" * 70)
+
     try:
         # 实例化并运行训练器
-        trainer = SelfPlayTrainer()
+        trainer = RLLibSelfPlayTrainer()
         trainer.run()
-        
+
     except KeyboardInterrupt:
-        print("\n⚠️  训练被用户中断")
-        
+        print("\n⚠️  训练被用户中断。")
+
     except Exception as e:
-        print("\n❌ 训练过程中发生严重错误:")
+        print(f"\n❌ 训练过程中发生严重错误: {e}")
         # 打印异常的详细信息，有助于调试
         import traceback
         traceback.print_exc()
-        
+
     finally:
         print("\n程序执行结束。")
 
