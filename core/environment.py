@@ -90,7 +90,7 @@ class Piece:
 # --- GameEnvironment 类 (RLlib 兼容版) ---
 # ==============================================================================
 
-class GameEnvironment(gym.Env):
+class DarkChessEnv(gym.Env):
     """
     暗棋游戏核心逻辑环境，兼容Gymnasium接口。
     此版本被设计为由 RLlib 的 MultiAgentEnv 封装，因此它只处理单步逻辑。

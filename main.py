@@ -1,5 +1,6 @@
 import sys
 import os
+import ray
 
 # 将项目根目录添加到Python路径中，以确保可以正确导入其他模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +22,8 @@ def main():
     print("=" * 70)
 
     try:
+        # 推荐在主入口初始化 Ray
+        ray.init()
         # 实例化并运行训练器
         trainer = RLLibSelfPlayTrainer()
         trainer.run()
@@ -36,6 +39,8 @@ def main():
 
     finally:
         print("\n程序执行结束。")
+        # 确保 Ray 在程序结束时关闭
+        ray.shutdown()
 
 if __name__ == "__main__":
     # 当该脚本被直接执行时，调用main函数

@@ -4,7 +4,6 @@ import os
 import shutil
 import torch
 import numpy as np
-import ray
 from ray import tune
 from ray.air import RunConfig, CheckpointConfig
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -34,8 +33,7 @@ class RLLibSelfPlayTrainer:
 
     def run(self):
         """执行完整的训练流程。"""
-        print("--- [步骤 1/3] 初始化 Ray 和环境 ---")
-        ray.init(num_gpus=1 if PPO_DEVICE == 'cuda' else 0, local_mode=False)
+        print("--- [步骤 1/3] 初始化环境和模型 ---")
         
         ModelCatalog.register_custom_model("custom_torch_model", RLLibCustomNetwork)
         register_env("dark_chess_multi_agent", lambda config: RLLibMultiAgentEnv(config))
@@ -59,32 +57,50 @@ class RLLibSelfPlayTrainer:
                 if not policies or sum(probabilities) == 0:
                     return MAIN_POLICY_ID # 备用方案
                 return np.random.choice(policies, p=probabilities)
+        
+        is_cuda = PPO_DEVICE == 'cuda'
+        
+        # 根据设备（CPU/GPU）设置学习器（Learner）配置
+        if is_cuda:
+            # 使用1个 Learner，并为该 Learner 分配1个 GPU
+            learner_config = {"num_learners": 1, "num_gpus_per_learner": 1}
+        else:
+            # num_learners=0 表示在主进程上使用本地学习器，不分配GPU
+            learner_config = {"num_learners": 0, "num_gpus_per_learner": 0}
 
         config = (
             PPOConfig()
             .environment("dark_chess_multi_agent")
             .framework("torch")
-            .rollouts(num_rollout_workers=N_ENVS, rollout_fragment_length="auto")
+            .env_runners(num_env_runners=N_ENVS, rollout_fragment_length="auto")
+            # 新版API：使用 .learners() 配置计算资源，取代旧的 .resources(num_gpus=...)
+            .learners(**learner_config)
+            # 新版API：训练相关的配置
             .training(
-                model={"custom_model": "custom_torch_model"},
+                # model 配置已从 .training() 中移除，并移至 .rl_module()
                 lr=INITIAL_LR,
                 clip_param=PPO_CLIP_RANGE,
-                train_batch_size=PPO_N_STEPS * N_ENVS,
-                sgd_minibatch_size=PPO_BATCH_SIZE,
-                num_sgd_iter=PPO_N_EPOCHS,
+                # 新版API：应使用 train_batch_size_per_learner
+                train_batch_size_per_learner=PPO_N_STEPS * N_ENVS,
+                minibatch_size=PPO_BATCH_SIZE,
+                num_epochs=PPO_N_EPOCHS,
                 lambda_=PPO_GAE_LAMBDA,
                 vf_loss_coeff=PPO_VF_COEF,
                 entropy_coeff=PPO_ENT_COEF,
             )
+            # 新版API：使用 .rl_module() 配置神经网络模型
+            # 修复 DeprecationWarning：使用 model_config 替代 model_config_dict
+            .rl_module(
+                model_config={"custom_model": "custom_torch_model"}
+            )
             .multi_agent(
-                policies=policies, # 初始时只有主策略
+                policies=policies,
                 policy_mapping_fn=policy_mapping_fn,
                 policies_to_train=[MAIN_POLICY_ID],
             )
-            .resources(num_gpus=1 if PPO_DEVICE == 'cuda' else 0)
-            .callbacks(SelfPlayCallback) # 核心逻辑在 Callback 中
-            .rl_module(_enable_rl_module_api=False)
-            .training(_enable_learner_api=False)
+            .callbacks(SelfPlayCallback)
+            # 明确启用新的 API Stack (RLModule 和 Learner)，这是当前默认且推荐的方式
+            .api_stack(enable_rl_module_and_learner=True)
         )
 
         # 使用 tune.Tuner 可以更优雅地处理检查点和恢复
@@ -97,13 +113,12 @@ class RLLibSelfPlayTrainer:
                     checkpoint_at_end=True,
                     num_to_keep=3, # 保留最近3个检查点
                 ),
-                local_dir=TENSORBOARD_LOG_PATH,
+                storage_path=TENSORBOARD_LOG_PATH,
                 name="PPO_self_play_experiment"
             ),
             param_space=config.to_dict(),
         )
         
-        # 尝试从最新的检查点恢复
         # tuner.fit() 会自动处理恢复逻辑
         results = tuner.fit()
         
@@ -111,5 +126,3 @@ class RLLibSelfPlayTrainer:
         best_checkpoint = results.get_best_result(metric="episode_reward_mean", mode="max").checkpoint
         if best_checkpoint:
             print(f"最佳检查点位于: {best_checkpoint.path}")
-            
-        ray.shutdown()
