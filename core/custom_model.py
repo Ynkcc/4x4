@@ -100,11 +100,33 @@ class CustomDarkChessRLModule(TorchRLModule, ValueFunctionAPI):
         with torch.no_grad():
             shared_features = self._get_shared_features(batch)
             action_logits = self.action_branch(shared_features)
+            
+            # 应用action mask
+            if "action_mask" in batch[Columns.OBS]:
+                action_mask = batch[Columns.OBS]["action_mask"]
+                # 将无效动作的logits设为非常小的值
+                action_logits = torch.where(
+                    action_mask.bool(),
+                    action_logits,
+                    torch.full_like(action_logits, -1e8)
+                )
+            
             return {Columns.ACTION_DIST_INPUTS: action_logits}
 
     def _forward_exploration(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         shared_features = self._get_shared_features(batch)
         action_logits = self.action_branch(shared_features)
+        
+        # 应用action mask
+        if "action_mask" in batch[Columns.OBS]:
+            action_mask = batch[Columns.OBS]["action_mask"]
+            # 将无效动作的logits设为非常小的值
+            action_logits = torch.where(
+                action_mask.bool(),
+                action_logits,
+                torch.full_like(action_logits, -1e8)
+            )
+        
         return {Columns.ACTION_DIST_INPUTS: action_logits}
 
     def _forward_train(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
@@ -112,12 +134,22 @@ class CustomDarkChessRLModule(TorchRLModule, ValueFunctionAPI):
         action_logits = self.action_branch(shared_features)
         value_preds = torch.squeeze(self.value_branch(shared_features), -1)
         
+        # 应用action mask
+        if "action_mask" in batch[Columns.OBS]:
+            action_mask = batch[Columns.OBS]["action_mask"]
+            # 将无效动作的logits设为非常小的值
+            action_logits = torch.where(
+                action_mask.bool(),
+                action_logits,
+                torch.full_like(action_logits, -1e8)
+            )
+        
         return {
             Columns.ACTION_DIST_INPUTS: action_logits,
             Columns.VF_PREDS: value_preds
         }
     
-    def compute_values(self, batch: Dict[str, Any]) -> torch.Tensor:
+    def compute_values(self, batch: Dict[str, Any], **kwargs) -> torch.Tensor:
         features = self._get_shared_features(batch)
         return torch.squeeze(self.value_branch(features), -1)
 

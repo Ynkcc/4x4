@@ -15,6 +15,12 @@ from ray.rllib.policy import Policy
 from ray.rllib.utils.typing import PolicyID
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+# 添加新版API的import
+from ray.rllib.env.env_runner import EnvRunner
+try:
+    from ray.rllib.env.multi_agent_episode import MultiAgentEpisode
+except ImportError:
+    MultiAgentEpisode = None
 
 from utils.constants import *
 from utils import elo
@@ -40,10 +46,8 @@ class SelfPlayCallback(DefaultCallbacks):
         os.makedirs(OPPONENT_POOL_DIR, exist_ok=True)
         os.makedirs(SELF_PLAY_OUTPUT_DIR, exist_ok=True)
         
-        # 修复点：调用 _load_state 前，确保它已定义
         self._load_state()
 
-    # 修复点：添加 _load_state 方法
     def _load_state(self):
         """从状态文件加载 Elo 评级和模型生成数据。"""
         if os.path.exists(self.state_file_path):
@@ -59,7 +63,6 @@ class SelfPlayCallback(DefaultCallbacks):
         else:
             logger.info("未找到 Elo 状态文件，将使用默认值初始化。")
 
-    # 修复点：添加 _save_state 方法
     def _save_state(self):
         """保存当前的 Elo 评级和模型生成数据。"""
         state = {
@@ -79,11 +82,13 @@ class SelfPlayCallback(DefaultCallbacks):
         main_elo = self.elo_ratings.get(MAIN_POLICY_ID, ELO_DEFAULT)
         
         weights = {}
+        # [鲁棒性修复] 始终确保主策略（自我对弈）在采样池中
         weights[MAIN_POLICY_ID] = 1.0 
         
         all_opponents = self.long_term_pool_paths + self.short_term_pool_paths
         for opp_name in all_opponents:
-            opp_policy_id = f"{OPPONENT_POLICY_ID_PREFIX}{opp_name.replace('.pt', '')}"
+            # 确保文件名和策略ID正确对应
+            opp_policy_id = f"{OPPONENT_POLICY_ID_PREFIX}{os.path.splitext(opp_name)[0]}"
             opp_elo = self.elo_ratings.get(opp_policy_id, ELO_DEFAULT)
             weight = np.exp(-abs(main_elo - opp_elo) / ELO_WEIGHT_TEMPERATURE)
             weights[opp_policy_id] = weight
@@ -95,9 +100,16 @@ class SelfPlayCallback(DefaultCallbacks):
         """计算最新的采样分布并将其广播到所有 EnvRunner。"""
         dist = self._get_opponent_sampling_distribution()
         
-        def set_sampler(worker: RolloutWorker):
-            worker.sampler_dist = dist
+        def set_sampler(env_runner):
+            # 将采样分布附加到 env_runner 对象上，以便 policy_mapping_fn 访问
+            env_runner.sampler_dist = dist
+            # 兼容旧版API
+            if hasattr(env_runner, 'worker_index'):
+                logger.debug(f"EnvRunner {env_runner.worker_index} sampler updated: {dist}")
+            else:
+                logger.debug(f"EnvRunner sampler updated: {dist}")
         
+        # 使用 foreach_env_runner 确保在所有 rollout worker 上设置
         algorithm.env_runner_group.foreach_env_runner(set_sampler)
         logger.info("已将最新的对手采样分布广播到所有 EnvRunners。")
 
@@ -109,61 +121,141 @@ class SelfPlayCallback(DefaultCallbacks):
         main_module = algorithm.get_module(MAIN_POLICY_ID)
 
         for opp_name in all_opponents:
-            module_id = f"{OPPONENT_POLICY_ID_PREFIX}{opp_name.replace('.pt', '')}"
+            module_id = f"{OPPONENT_POLICY_ID_PREFIX}{os.path.splitext(opp_name)[0]}"
+            # 只有当模块不存在时才添加
             if not algorithm.get_module(module_id):
+                 logger.info(f"动态添加历史对手模块: {module_id}")
                  algorithm.add_module(
                     module_id=module_id,
                     module_spec=RLModuleSpec.from_module(main_module),
                 )
 
-        def setup_worker_modules(worker: RolloutWorker):
+        def setup_worker_modules(env_runner):
+            # [鲁棒性修复] 确保 env_runner 上有 sampler_dist 属性
+            if not hasattr(env_runner, "sampler_dist"):
+                env_runner.sampler_dist = {}
+
             for opp_name in all_opponents:
-                module_id = f"{OPPONENT_POLICY_ID_PREFIX}{opp_name.replace('.pt', '')}"
+                module_id = f"{OPPONENT_POLICY_ID_PREFIX}{os.path.splitext(opp_name)[0]}"
                 model_path = os.path.join(OPPONENT_POOL_DIR, opp_name)
                 
-                module = worker.module.get(module_id)
+                module = env_runner.module.get(module_id)
                 if module and os.path.exists(model_path):
                     try:
+                        # 确保在正确的设备上加载模型
                         state_dict = torch.load(model_path, map_location=module.device)
                         module.load_state_dict(state_dict)
-                        logger.info(f"Worker {worker.worker_index}: 成功加载模块 {module_id}")
+                        # 兼容旧版API
+                        if hasattr(env_runner, 'worker_index'):
+                            logger.info(f"EnvRunner {env_runner.worker_index}: 成功加载模块 {module_id}")
+                        else:
+                            logger.info(f"EnvRunner: 成功加载模块 {module_id}")
                     except Exception as e:
-                        logger.error(f"Worker {worker.worker_index}: 加载模型 {model_path} 失败: {e}")
+                        # 兼容旧版API
+                        if hasattr(env_runner, 'worker_index'):
+                            logger.error(f"EnvRunner {env_runner.worker_index}: 加载模型 {model_path} 失败: {e}")
+                        else:
+                            logger.error(f"EnvRunner: 加载模型 {model_path} 失败: {e}")
 
         algorithm.env_runner_group.foreach_env_runner(setup_worker_modules)
         self._update_sampler_on_workers(algorithm)
 
     def on_episode_end(
-        self, *, worker: "RolloutWorker", base_env: BaseEnv,
-        episode: EpisodeV2, env_index: int, **kwargs,
+        self, *, 
+        episode, 
+        env_index: int,
+        worker: "RolloutWorker" = None,
+        base_env: BaseEnv = None, 
+        env_runner: "RolloutWorker" = None,
+        **kwargs,
     ):
-        """在新版 API 中，使用 EpisodeV2 对象。"""
+        """在新版 API 中，处理不同类型的episode对象。"""
+        # 兼容性处理：使用env_runner如果worker为None
+        if worker is None and env_runner is not None:
+            worker = env_runner
+            
+        # 如果没有worker，无法获取环境信息，直接返回
+        if worker is None:
+            return
+            
         main_agent_id, opponent_agent_id, opponent_module_id = None, None, None
 
-        for agent_id in episode.agent_ids:
-            module_id = episode.module_for(agent_id)
+        # 处理不同类型的episode对象
+        if hasattr(episode, 'agent_for_module_map'):
+            # 旧版EpisodeV2对象
+            agent_module_map = episode.agent_for_module_map
+        elif hasattr(episode, 'agent_ids') and hasattr(episode, 'module_for'):
+            # 新版MultiAgentEpisode对象
+            agent_module_map = {}
+            for agent_id in episode.agent_ids:
+                try:
+                    module_id = episode.module_for(agent_id)
+                    agent_module_map[agent_id] = module_id
+                except:
+                    # 如果无法获取module_id，跳过这个agent
+                    continue
+        else:
+            # 无法处理的episode类型
+            return
+
+        # 确定哪个 agent 是 main_policy
+        for agent_id, module_id in agent_module_map.items():
             if module_id == MAIN_POLICY_ID:
                 main_agent_id = agent_id
-            else:
+                break
+        
+        # 如果没有 main_policy 参与（不太可能发生），则退出
+        if main_agent_id is None:
+            return
+
+        # 找到对手 agent 和 module
+        for agent_id, module_id in agent_module_map.items():
+            if agent_id != main_agent_id:
                 opponent_agent_id = agent_id
                 opponent_module_id = module_id
+                break
         
-        if not all([main_agent_id, opponent_agent_id, opponent_module_id]): return
+        if not all([opponent_agent_id, opponent_module_id]): 
+            return
 
-        last_info = episode.last_info_for(main_agent_id) or {}
-        winner = last_info.get("winner")
-        if winner is None: return
+        # 获取游戏结果信息，兼容不同的episode类型
+        winner = None
+        if hasattr(episode, 'last_info_for'):
+            # EpisodeV2类型
+            last_info = episode.last_info_for(main_agent_id) or {}
+            winner = last_info.get("winner")
+        elif hasattr(episode, 'get_infos'):
+            # MultiAgentEpisode类型
+            try:
+                infos = episode.get_infos(agent_ids=[main_agent_id])
+                if infos and len(infos) > 0:
+                    # 获取最后一个info
+                    last_info = infos[-1].get(main_agent_id, {})
+                    winner = last_info.get("winner")
+            except:
+                pass
+        
+        if winner is None: 
+            return
 
+        # 获取环境信息
+        if base_env is None:
+            return
+            
         env = base_env.get_sub_environments()[env_index]
         main_player_num = env._agent_to_player_map.get(main_agent_id)
-        if main_player_num is None: return
+        if main_player_num is None: 
+            return
 
         if opponent_module_id not in self.win_rates_buffer:
             self.win_rates_buffer[opponent_module_id] = []
         
-        if winner == 0: self.win_rates_buffer[opponent_module_id].append(0.5)
-        elif winner == main_player_num: self.win_rates_buffer[opponent_module_id].append(1.0)
-        else: self.win_rates_buffer[opponent_module_id].append(0.0)
+        if winner == 0: 
+            self.win_rates_buffer[opponent_module_id].append(0.5)
+        elif winner == main_player_num: 
+            self.win_rates_buffer[opponent_module_id].append(1.0)
+        else: 
+            self.win_rates_buffer[opponent_module_id].append(0.0)
 
     def on_train_result(self, *, algorithm: Algorithm, result: dict, **kwargs):
         """评估和更新逻辑，适配新 API。"""
@@ -182,11 +274,11 @@ class SelfPlayCallback(DefaultCallbacks):
             main_elo = self.elo_ratings.get(MAIN_POLICY_ID, ELO_DEFAULT)
             opponent_elo = self.elo_ratings.get(opponent, ELO_DEFAULT)
             
-            new_main_elo, new_opponent_elo = elo.rate_1vs1(main_elo, opponent_elo, win_rate)
-            self.elo_ratings[MAIN_POLICY_ID] = new_main_elo
-            self.elo_ratings[opponent] = new_opponent_elo
+            # 使用正确的 Elo 更新函数
+            updated_elos = elo.update_elo(self.elo_ratings, MAIN_POLICY_ID, opponent, win_rate)
+            self.elo_ratings.update(updated_elos)
             
-            logger.info(f"    Elo: {main_elo:.0f} -> {new_main_elo:.0f} | Opponent Elo: {opponent_elo:.0f} -> {new_opponent_elo:.0f}")
+            logger.info(f"    Elo: {main_elo:.0f} -> {self.elo_ratings[MAIN_POLICY_ID]:.0f} | Opponent Elo: {opponent_elo:.0f} -> {self.elo_ratings[opponent]:.0f}")
             all_results.extend(results)
 
         overall_win_rate = np.mean(all_results) if all_results else 0.0
@@ -201,7 +293,7 @@ class SelfPlayCallback(DefaultCallbacks):
             new_opponent_path = os.path.join(OPPONENT_POOL_DIR, new_opponent_name)
             torch.save(main_module.state_dict(), new_opponent_path)
             
-            new_opponent_module_id = f"{OPPONENT_POLICY_ID_PREFIX}{new_opponent_name.replace('.pt', '')}"
+            new_opponent_module_id = f"{OPPONENT_POLICY_ID_PREFIX}{os.path.splitext(new_opponent_name)[0]}"
             self.elo_ratings[new_opponent_module_id] = self.elo_ratings.get(MAIN_POLICY_ID, ELO_DEFAULT)
             self.model_generations[new_opponent_module_id] = self.latest_generation
 
@@ -211,6 +303,7 @@ class SelfPlayCallback(DefaultCallbacks):
                 module_spec=RLModuleSpec.from_module(main_module),
             )
             
+            # 确保新添加的模块是不可训练的
             def set_module_trainable(learner):
                 if new_opponent_module_id in learner.module:
                     learner.remove_module_to_update(new_opponent_module_id)
@@ -225,13 +318,12 @@ class SelfPlayCallback(DefaultCallbacks):
         self.win_rates_buffer.clear()
         self._save_state()
 
-    # 修复点：添加 _manage_opponent_pool 的完整逻辑
     def _manage_opponent_pool(self, new_opponent_name: str, algorithm: Algorithm):
         """管理短期和长期对手池。"""
         self.short_term_pool_paths.append(new_opponent_name)
         if len(self.short_term_pool_paths) > SHORT_TERM_POOL_MAX_SIZE:
             to_remove_name = self.short_term_pool_paths.pop(0)
-            module_id_to_remove = f"{OPPONENT_POLICY_ID_PREFIX}{to_remove_name.replace('.pt', '')}"
+            module_id_to_remove = f"{OPPONENT_POLICY_ID_PREFIX}{os.path.splitext(to_remove_name)[0]}"
             self._remove_module_from_algorithm(algorithm, module_id_to_remove, to_remove_name)
 
         if self.latest_generation >= self.long_term_power_of_2:
@@ -241,10 +333,11 @@ class SelfPlayCallback(DefaultCallbacks):
 
         if len(self.long_term_pool_paths) > LONG_TERM_POOL_MAX_SIZE:
             to_remove_name = self.long_term_pool_paths.pop(0)
-            module_id_to_remove = f"{OPPONENT_POLICY_ID_PREFIX}{to_remove_name.replace('.pt', '')}"
-            self._remove_module_from_algorithm(algorithm, module_id_to_remove, to_remove_name)
+            module_id_to_remove = f"{OPPONENT_POLICY_ID_PREFIX}{os.path.splitext(to_remove_name)[0]}"
+            # 确保不会把自己从短期池中移除（如果它同时在长期池中）
+            if to_remove_name not in self.short_term_pool_paths:
+                 self._remove_module_from_algorithm(algorithm, module_id_to_remove, to_remove_name)
 
-    # 修复点：添加 _remove_module_from_algorithm 的完整逻辑
     def _remove_module_from_algorithm(self, algorithm: Algorithm, module_id_to_remove: str, model_filename: str):
         """从算法中移除模块并删除相关文件。"""
         logger.info(f"✂️  清理过时对手模块: {module_id_to_remove}")

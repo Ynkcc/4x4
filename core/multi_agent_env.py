@@ -84,8 +84,16 @@ class RLLibMultiAgentEnv(MultiAgentEnv):
         # 核心修复点 4: 再次将 action_mask 添加到观察字典中
         obs_with_mask = self._add_action_mask_to_obs(obs_dict, info['action_mask'])
 
-        # 如果游戏未结束，返回下一个行动智能体的观察
-        obs_return = {next_agent_id: obs_with_mask} if not (terminated or truncated) else {}
+        # 新版RLlib要求：当游戏结束时，必须为所有参与的agent提供最后的观察值
+        if terminated or truncated:
+            # 游戏结束时，为两个智能体都提供最后的观察状态
+            obs_return = {
+                acting_agent_id: obs_with_mask,
+                self._get_opponent_agent_id(acting_agent_id): obs_with_mask
+            }
+        else:
+            # 游戏继续时，只为下一个行动的智能体提供观察
+            obs_return = {next_agent_id: obs_with_mask}
 
         # 奖励只给当前行动的智能体
         rew_dict = {
