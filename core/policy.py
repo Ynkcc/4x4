@@ -1,11 +1,13 @@
-# src_code/game/policy.py
+# src_code/core/policy.py
 import gymnasium as gym
 import torch as th
 import torch.nn as nn
-from typing import Dict, Any, cast, Callable
+from typing import Dict, Any, cast, Callable, List
 
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
+from ray.rllib.models.torch.misc import SlimFC
+from ray.rllib.utils.typing import ModelConfigDict, TensorType
+
 from utils.constants import (
     NETWORK_NUM_RES_BLOCKS, 
     NETWORK_NUM_HIDDEN_CHANNELS,
@@ -15,7 +17,7 @@ from utils.constants import (
 # --- 激活函数选择 ---
 ACTIVATION_FN = nn.SiLU
 
-# --- 【V8 修改】核心网络块 ---
+# --- 核心网络块 (RLlib版) ---
 
 class ResidualBlock(nn.Module):
     """
@@ -39,118 +41,41 @@ class ResidualBlock(nn.Module):
         out += residual
         return out
 
-# --- 【V8 修改】主网络架构 ---
-
-class CustomNetwork(BaseFeaturesExtractor):
-    """
-    【V8 版】自定义特征提取器。
-    - CNN处理棋盘，MLP处理标量。
-    - 两者的输出被拼接（Concatenate）后，送入Actor/Critic头。
-    - 【V9 兼容】: 无需修改即可自动适应状态堆叠后的输入维度。
-    """
-    def __init__(self, observation_space: gym.spaces.Dict, features_dim: int):
-        super(CustomNetwork, self).__init__(observation_space, features_dim)
-
-        # --- 棋盘处理分支 ---
-        board_channels = observation_space["board"].shape[0]
-        self.board_conv = nn.Sequential(
-            nn.Conv2d(board_channels, NETWORK_NUM_HIDDEN_CHANNELS, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(NETWORK_NUM_HIDDEN_CHANNELS),
-            ACTIVATION_FN(),
-            *[ResidualBlock(NETWORK_NUM_HIDDEN_CHANNELS) for _ in range(NETWORK_NUM_RES_BLOCKS)],
-            nn.AdaptiveAvgPool2d((1, 1)),  # 全局平均池化
-            nn.Flatten(),
-        )
-
-        # --- 标量处理分支 ---
-        scalar_dim = observation_space["scalars"].shape[0]
-        self.scalar_encoder = nn.Sequential(
-            nn.Linear(scalar_dim, SCALAR_ENCODER_OUTPUT_DIM),
-            ACTIVATION_FN(),
-            nn.Linear(SCALAR_ENCODER_OUTPUT_DIM, SCALAR_ENCODER_OUTPUT_DIM),
-            ACTIVATION_FN(),
-        )
-
-        # --- 计算总特征维度 ---
-        board_out_dim = NETWORK_NUM_HIDDEN_CHANNELS
-        scalar_out_dim = SCALAR_ENCODER_OUTPUT_DIM
-        total_features = board_out_dim + scalar_out_dim
-
-        # --- 最终特征融合 ---
-        self.final_encoder = nn.Sequential(
-            nn.Linear(total_features, features_dim),
-            ACTIVATION_FN(),
-        )
-
-    def forward(self, observations: Dict[str, th.Tensor]) -> th.Tensor:
-        board_obs = observations["board"]
-        scalar_obs = observations["scalars"]
-
-        # 处理棋盘
-        board_features = self.board_conv(board_obs)
-
-        # 处理标量
-        scalar_features = self.scalar_encoder(scalar_obs)
-
-        # 拼接特征
-        combined = th.cat([board_features, scalar_features], dim=1)
-
-        # 最终编码
-        return self.final_encoder(combined)
-
-# --- 【V8 修改】自定义策略 ---
-
-class CustomMaskableActorCriticPolicy(MaskableActorCriticPolicy):
-    """
-    【V8 版】自定义Maskable策略。
-    - 使用自定义特征提取器。
-    - 支持动作掩码。
-    """
-    def __init__(self, *args, **kwargs):
-        super(CustomMaskableActorCriticPolicy, self).__init__(
-            *args,
-            features_extractor_class=CustomNetwork,
-            **kwargs
-        )
-
 # --- RLlib 版本的自定义网络 ---
-
-import ray
-from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
-from ray.rllib.models.torch.fcnet import FullyConnectedNetwork
-from ray.rllib.utils.typing import ModelConfigDict, TensorType
-from ray.rllib.models.torch.misc import SlimFC
-from typing import List
 
 class RLLibCustomNetwork(TorchModelV2, nn.Module):
     """
-    RLlib 版本的自定义网络。
+    RLlib 版本的自定义网络 (重构版)。
+    - forward 方法只返回 logits。
+    - value_function 方法独立计算价值。
+    - 统一处理展平和非展平的观察输入。
     """
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
-        # 检查观察空间是否被展平了
-        if hasattr(obs_space, 'spaces') and 'board' in obs_space.spaces:
-            # 原始的 Dict 观察空间
+        # 内部变量，用于缓存 forward pass 计算出的特征
+        self._features = None
+        
+        # 检查观察空间是否是原始的 Dict 空间
+        if isinstance(obs_space, gym.spaces.Dict) and "board" in obs_space.spaces:
             board_shape = obs_space["board"].shape
             scalar_shape = obs_space["scalars"].shape
-            self.use_flattened_obs = False
-        else:
-            # 展平的观察空间
-            print(f"检测到展平的观察空间: {obs_space}")
-            # 根据我们已知的维度计算
-            board_channels = 48  # NUM_PIECE_TYPES * 2 + 2) * stack_size
-            board_size = 4 * 4  # BOARD_ROWS * BOARD_COLS
-            board_flat_size = board_channels * board_size  # 768
-            scalar_size = obs_space.shape[0] - board_flat_size  # 1296 - 768 = 528
+            self._is_obs_flattened = False
+        else: # 否则，是展平的 Box 空间
+            # 根据已知维度反推
+            # (NUM_PIECE_TYPES * 2 + 2) * stack_size
+            # (5 * 2 + 2) * 4 = 12 * 4 = 48
+            board_channels = 48 
+            board_size = 4 * 4
+            self._board_flat_size = board_channels * board_size
+            scalar_size = obs_space.shape[0] - self._board_flat_size
             
             board_shape = (board_channels, 4, 4)
             scalar_shape = (scalar_size,)
-            self.use_flattened_obs = True
-            self.board_flat_size = board_flat_size
+            self._is_obs_flattened = True
 
-        # 棋盘处理分支
+        # --- 棋盘处理分支 ---
         self.board_conv = nn.Sequential(
             nn.Conv2d(board_shape[0], NETWORK_NUM_HIDDEN_CHANNELS, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(NETWORK_NUM_HIDDEN_CHANNELS),
@@ -160,7 +85,7 @@ class RLLibCustomNetwork(TorchModelV2, nn.Module):
             nn.Flatten(),
         )
 
-        # 标量处理分支
+        # --- 标量处理分支 ---
         self.scalar_encoder = nn.Sequential(
             nn.Linear(scalar_shape[0], SCALAR_ENCODER_OUTPUT_DIM),
             ACTIVATION_FN(),
@@ -168,61 +93,51 @@ class RLLibCustomNetwork(TorchModelV2, nn.Module):
             ACTIVATION_FN(),
         )
 
-        # 计算特征维度
+        # --- 计算总特征维度 ---
         board_out_dim = NETWORK_NUM_HIDDEN_CHANNELS
         scalar_out_dim = SCALAR_ENCODER_OUTPUT_DIM
         features_dim = board_out_dim + scalar_out_dim
 
-        # 策略头
+        # --- 策略头 (Actor) ---
         self.policy_head = SlimFC(features_dim, num_outputs)
 
-        # 价值头
+        # --- 价值头 (Critic) ---
         self.value_head = SlimFC(features_dim, 1)
 
-    def forward(self, input_dict, state, seq_lens):
+    def forward(self, input_dict: Dict[str, TensorType], state: List[TensorType], seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        """
+        计算动作 logits。
+        同时，将计算出的共享特征缓存到 self._features 中，供 value_function 调用。
+        """
         obs = input_dict["obs"]
         
-        # 检查观察的实际结构
-        if isinstance(obs, dict):
-            # 如果是字典，直接使用原始结构
-            if "board" in obs and "scalars" in obs:
-                board_obs = obs["board"]
-                scalar_obs = obs["scalars"]
-            else:
-                # 查看字典的内容来调试
-                print(f"调试：观察字典键 = {list(obs.keys())}")
-                raise ValueError(f"观察字典不包含预期的键。实际键: {list(obs.keys())}")
-        elif hasattr(obs, 'shape') and len(obs.shape) >= 2:
-            # 如果是张量且被展平了
-            board_obs = obs[:, :self.board_flat_size].reshape(-1, 48, 4, 4)
-            scalar_obs = obs[:, self.board_flat_size:]
+        # 根据观察空间是展平还是字典来解析输入
+        if self._is_obs_flattened:
+            board_obs = obs[:, :self._board_flat_size].reshape(-1, 48, 4, 4)
+            scalar_obs = obs[:, self._board_flat_size:]
         else:
-            print(f"调试：不支持的观察类型 = {type(obs)}")
-            print(f"调试：观察内容 = {obs}")
-            raise ValueError(f"不支持的观察类型: {type(obs)}")
+            # RLlib 在送入模型前会将 Dict 观察值放入 "obs" 键下
+            board_obs = obs["board"]
+            scalar_obs = obs["scalars"]
 
-        # 处理棋盘
+        # --- 特征提取 ---
         board_features = self.board_conv(board_obs)
-
-        # 处理标量
         scalar_features = self.scalar_encoder(scalar_obs)
 
-        # 拼接
-        features = th.cat([board_features, scalar_features], dim=1)
+        # 拼接特征并缓存，以供 value_function 使用
+        self._features = th.cat([board_features, scalar_features], dim=1)
 
-        # 策略输出
-        logits = self.policy_head(features)
+        # --- 策略输出 ---
+        logits = self.policy_head(self._features)
 
-        # 价值输出
-        value = self.value_head(features).squeeze(-1)
-        
-        # 保存价值输出供value_function方法使用
-        self._value_out = value
-
+        # 只返回 logits 和 state
         return logits, state
 
-    def value_function(self):
-        return self._value_out
-
-    def custom_loss(self, policy_loss, vf_loss):
-        return policy_loss + vf_loss
+    def value_function(self) -> TensorType:
+        """
+        【新增】独立的价值函数计算方法。
+        RLlib 会在需要计算价值时自动调用此方法。
+        """
+        assert self._features is not None, "must call forward() first"
+        value = self.value_head(self._features).squeeze(-1)
+        return value

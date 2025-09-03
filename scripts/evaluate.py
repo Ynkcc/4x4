@@ -7,11 +7,10 @@ import numpy as np
 from tqdm import tqdm
 import torch
 
-# 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 导入RLlib和项目模块
 import ray
+from ray.rllib.algorithms.algorithm import Algorithm # 导入 Algorithm
 from ray.rllib.policy.policy import Policy
 from ray.rllib.models import ModelCatalog
 from ray.tune.registry import register_env
@@ -20,7 +19,6 @@ from core.environment import GameEnvironment
 from core.policy import RLLibCustomNetwork
 from utils.constants import *
 
-# 注册自定义环境和模型
 register_env("dark_chess_env", lambda config: GameEnvironment())
 ModelCatalog.register_custom_model("custom_torch_model", RLLibCustomNetwork)
 
@@ -32,9 +30,6 @@ class EvaluationAgent:
         self.name = name
 
     def predict(self, observation: dict, deterministic: bool = True) -> int:
-        """使用策略进行预测"""
-        # RLlib 策略需要一个 observation_space 字典
-        # 我们的环境的 observation 已经是字典格式，所以直接传入
         action, _, _ = self.policy.compute_single_action(
             obs=observation,
             deterministic=deterministic
@@ -44,8 +39,6 @@ class EvaluationAgent:
 def play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_player: EvaluationAgent, seed: int) -> int:
     """进行一局完整的游戏，返回获胜方 (1 for red, -1 for black, 0 for draw)"""
     env.reset(seed=seed)
-    
-    # 强制红方先手
     env.current_player = 1
     
     while True:
@@ -53,10 +46,10 @@ def play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_playe
         
         obs = env.get_state()
         action_mask = env.action_masks()
-        obs['action_mask'] = action_mask # 将掩码添加到观察中
+        obs['action_mask'] = action_mask
         
         if not np.any(action_mask):
-            return -env.current_player # 当前玩家无棋可走，对方获胜
+            return -env.current_player
 
         action = current_player_agent.predict(obs)
         _, terminated, truncated, winner = env._internal_apply_action(action)
@@ -66,25 +59,22 @@ def play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_playe
 
         env.current_player *= -1
 
-def find_latest_checkpoint(directory: str) -> str | None:
-    """在指定目录中查找最新的RLlib检查点。"""
+def find_latest_checkpoint_from_experiment(experiment_path: str) -> str | None:
+    """在指定的实验目录中查找最新的检查点。"""
     try:
-        # PPO_xxxx 目录
-        ppo_dirs = [os.path.join(directory, d) for d in os.listdir(directory) if d.startswith("PPO_")]
-        if not ppo_dirs: return None
-        latest_experiment = max(ppo_dirs, key=os.path.getmtime)
-        
-        # checkpoint_xxxx 目录
-        checkpoint_dirs = [os.path.join(latest_experiment, d) for d in os.listdir(latest_experiment) if d.startswith("checkpoint_")]
-        if not checkpoint_dirs: return None
+        checkpoint_dirs = [
+            os.path.join(experiment_path, d)
+            for d in os.listdir(experiment_path)
+            if d.startswith("checkpoint_") and os.path.isdir(os.path.join(experiment_path, d))
+        ]
+        if not checkpoint_dirs:
+            return None
         return max(checkpoint_dirs, key=os.path.getmtime)
     except FileNotFoundError:
         return None
 
 def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
-    """
-    执行镜像对局评估。
-    """
+    """执行镜像对局评估 (重构版)。"""
     if EVALUATION_GAMES % 2 != 0:
         raise ValueError(f"EVALUATION_GAMES ({EVALUATION_GAMES}) 必须是偶数，才能进行完美的镜像对局。")
     num_groups = EVALUATION_GAMES // 2
@@ -94,14 +84,20 @@ def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
     print("=" * 70)
 
     try:
-        # 从检查点恢复策略
-        policy1 = Policy.from_checkpoint(model1_checkpoint_path)
-        policy2 = Policy.from_checkpoint(model2_checkpoint_path)
+        # 【修改】从检查点恢复整个算法实例
+        print(f"正在从检查点恢复模型 A: {model1_checkpoint_path}")
+        algo1 = Algorithm.from_checkpoint(model1_checkpoint_path)
+        print(f"正在从检查点恢复模型 B: {model2_checkpoint_path}")
+        algo2 = Algorithm.from_checkpoint(model2_checkpoint_path)
+        
+        # 【修改】从算法中获取主策略
+        policy1 = algo1.get_policy(MAIN_POLICY_ID)
+        policy2 = algo2.get_policy(MAIN_POLICY_ID)
         
         agent1 = EvaluationAgent(policy1, os.path.basename(os.path.dirname(model1_checkpoint_path)))
         agent2 = EvaluationAgent(policy2, os.path.basename(os.path.dirname(model2_checkpoint_path)))
         
-        print(f"评测模型 A: {agent1.name}")
+        print(f"\n评测模型 A: {agent1.name}")
         print(f"评测模型 B: {agent2.name}")
         print(f"对局组数: {num_groups} (总计 {EVALUATION_GAMES} 局游戏)")
         print("-" * 70)
@@ -112,34 +108,21 @@ def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
         return
 
     eval_env = GameEnvironment()
-    scores = {
-        'model1_wins': 0, 'model2_wins': 0, 'draws': 0,
-        'model1_as_red_wins': 0, 'model2_as_red_wins': 0,
-    }
+    scores = {'model1_wins': 0, 'model2_wins': 0, 'draws': 0, 'model1_as_red_wins': 0, 'model2_as_red_wins': 0}
 
     start_time = time.time()
     for i in tqdm(range(num_groups), desc="正在进行镜像对局评估"):
         game_seed = int(time.time_ns() + i) % (2**32 - 1)
 
-        # 第一局: 模型A执红 vs 模型B执黑
         winner_1 = play_one_game(eval_env, red_player=agent1, black_player=agent2, seed=game_seed)
-        if winner_1 == 1:
-            scores['model1_wins'] += 1
-            scores['model1_as_red_wins'] += 1
-        elif winner_1 == -1:
-            scores['model2_wins'] += 1
-        else:
-            scores['draws'] += 1
+        if winner_1 == 1: scores['model1_wins'] += 1; scores['model1_as_red_wins'] += 1
+        elif winner_1 == -1: scores['model2_wins'] += 1
+        else: scores['draws'] += 1
 
-        # 第二局: 模型B执红 vs 模型A执黑 (镜像)
         winner_2 = play_one_game(eval_env, red_player=agent2, black_player=agent1, seed=game_seed)
-        if winner_2 == 1:
-            scores['model2_wins'] += 1
-            scores['model2_as_red_wins'] += 1
-        elif winner_2 == -1:
-            scores['model1_wins'] += 1
-        else:
-            scores['draws'] += 1
+        if winner_2 == 1: scores['model2_wins'] += 1; scores['model2_as_red_wins'] += 1
+        elif winner_2 == -1: scores['model1_wins'] += 1
+        else: scores['draws'] += 1
             
     eval_env.close()
     end_time = time.time()
@@ -167,27 +150,24 @@ def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
 
 
 if __name__ == '__main__':
-    # 初始化 Ray
-    ray.init(local_mode=True) # 在本地模式下运行，方便调试
+    ray.init(local_mode=True)
 
     # --- 配置要评估的模型检查点 ---
-    # 脚本会自动查找最新的检查点
-    # 如果要指定特定模型，请直接提供检查点目录的完整路径
+    # 【重要】请提供实验目录的路径，脚本会自动查找最新的检查点
+    # 例如: .../tensorboard_logs/self_play_final/PPO_self_play_experiment_.../
     
-    # 示例1: 评估最新的两个训练运行
-    # MODEL_A_CHECKPOINT = find_latest_checkpoint(TENSORBOARD_LOG_PATH) # 通常是主宰者
-    # MODEL_B_CHECKPOINT = find_latest_checkpoint(...) # 可能是另一个分支的模型
+    # 示例:
+    MODEL_A_EXPERIMENT_PATH = "/path/to/your/project/tensorboard_logs/self_play_final/PPO_self_play_experiment_2023-10-27_10-00-00_.../"
+    MODEL_B_EXPERIMENT_PATH = "/path/to/your/project/tensorboard_logs/self_play_final/PPO_self_play_experiment_2023-10-26_18-00-00_.../"
+
+    print("请注意：请在脚本中修改 MODEL_A_EXPERIMENT_PATH 和 MODEL_B_EXPERIMENT_PATH 的路径。")
     
-    # 示例2: 手动指定路径
-    # 注意: 路径必须指向 checkpoint_xxxxx 目录，而不是PPO_...目录
-    MODEL_A_CHECKPOINT = "/path/to/your/project/tensorboard_logs/self_play_final/PPO_dark_chess_multi_agent_.../checkpoint_000100"
-    MODEL_B_CHECKPOINT = "/path/to/your/project/tensorboard_logs/self_play_final/PPO_dark_chess_multi_agent_.../checkpoint_000090"
+    # checkpoint_a = find_latest_checkpoint_from_experiment(MODEL_A_EXPERIMENT_PATH)
+    # checkpoint_b = find_latest_checkpoint_from_experiment(MODEL_B_EXPERIMENT_PATH)
     
-    print("请注意：请在脚本中修改 MODEL_A_CHECKPOINT 和 MODEL_B_CHECKPOINT 的路径。")
-    
-    # if MODEL_A_CHECKPOINT and MODEL_B_CHECKPOINT:
-    #     evaluate_models(MODEL_A_CHECKPOINT, MODEL_B_CHECKPOINT)
+    # if checkpoint_a and checkpoint_b:
+    #     evaluate_models(checkpoint_a, checkpoint_b)
     # else:
-    #     print("错误: 未能找到有效的模型检查点路径，请检查 TENSORBOARD_LOG_PATH 或手动指定路径。")
+    #     print("错误: 未能在指定的实验目录中找到有效的模型检查点路径。")
 
     ray.shutdown()
