@@ -5,45 +5,61 @@ import sys
 import time
 import numpy as np
 from tqdm import tqdm
-import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ray
 from ray.rllib.algorithms.algorithm import Algorithm # 导入 Algorithm
 from ray.rllib.policy.policy import Policy
-from ray.rllib.models import ModelCatalog
 from ray.tune.registry import register_env
 
-from core.environment import GameEnvironment
-from core.policy import RLLibCustomNetwork
+# 假设你的环境和常量定义在这里
+from core.environment import DarkChessEnv # 改为 MultiAgent 环境的底层
+from core.multi_agent_env import RLLibMultiAgentEnv
 from utils.constants import *
 
-register_env("dark_chess_env", lambda config: GameEnvironment())
-ModelCatalog.register_custom_model("custom_torch_model", RLLibCustomNetwork)
-
+# 注册环境
+register_env("dark_chess_env", lambda config: RLLibMultiAgentEnv(config))
 
 class EvaluationAgent:
     """用于评估的AI代理包装器"""
     def __init__(self, policy: Policy, name: str):
         self.policy = policy
         self.name = name
+        # RLModule API 使用不同的方法
+        self.is_rl_module = not hasattr(self.policy, 'compute_single_action')
 
     def predict(self, observation: dict, deterministic: bool = True) -> int:
-        action, _, _ = self.policy.compute_single_action(
-            obs=observation,
-            deterministic=deterministic
-        )
+        if self.is_rl_module:
+            # 新版 RLModule API
+            import torch
+            # RLModule 需要一个批次维度
+            obs_tensor = {k: torch.from_numpy(np.expand_dims(v, axis=0)) for k, v in observation.items()}
+            
+            if deterministic:
+                action_dist_inputs = self.policy.forward_inference({"obs": obs_tensor})[Columns.ACTION_DIST_INPUTS]
+                action = torch.argmax(action_dist_inputs, dim=1).item()
+            else:
+                action_dist_inputs = self.policy.forward_exploration({"obs": obs_tensor})[Columns.ACTION_DIST_INPUTS]
+                dist_class = self.policy.get_exploration_action_dist_cls()
+                action_dist = dist_class.from_logits(action_dist_inputs)
+                action = action_dist.sample().item()
+        else:
+            # 旧版 ModelV2 API
+            action, _, _ = self.policy.compute_single_action(
+                obs=observation,
+                deterministic=deterministic
+            )
         return int(action)
 
-def play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_player: EvaluationAgent, seed: int) -> int:
+def play_one_game(env: DarkChessEnv, red_player: EvaluationAgent, black_player: EvaluationAgent, seed: int) -> int:
     """进行一局完整的游戏，返回获胜方 (1 for red, -1 for black, 0 for draw)"""
     env.reset(seed=seed)
-    env.current_player = 1
     
     while True:
         current_player_agent = red_player if env.current_player == 1 else black_player
         
+        # obs 字典需要包含 action_mask
         obs = env.get_state()
         action_mask = env.action_masks()
         obs['action_mask'] = action_mask
@@ -52,12 +68,11 @@ def play_one_game(env: GameEnvironment, red_player: EvaluationAgent, black_playe
             return -env.current_player
 
         action = current_player_agent.predict(obs)
-        _, terminated, truncated, winner = env._internal_apply_action(action)
+        _, terminated, truncated, winner = env.step(action)
         
         if terminated or truncated:
             return winner if winner is not None else 0
 
-        env.current_player *= -1
 
 def find_latest_checkpoint_from_experiment(experiment_path: str) -> str | None:
     """在指定的实验目录中查找最新的检查点。"""
@@ -74,7 +89,7 @@ def find_latest_checkpoint_from_experiment(experiment_path: str) -> str | None:
         return None
 
 def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
-    """执行镜像对局评估 (重构版)。"""
+    """执行镜像对局评估。"""
     if EVALUATION_GAMES % 2 != 0:
         raise ValueError(f"EVALUATION_GAMES ({EVALUATION_GAMES}) 必须是偶数，才能进行完美的镜像对局。")
     num_groups = EVALUATION_GAMES // 2
@@ -84,13 +99,13 @@ def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
     print("=" * 70)
 
     try:
-        # 【修改】从检查点恢复整个算法实例
-        print(f"正在从检查点恢复模型 A: {model1_checkpoint_path}")
+        # --- 标准化模型加载 ---
+        print(f"正在从检查点恢复算法 A: {model1_checkpoint_path}")
         algo1 = Algorithm.from_checkpoint(model1_checkpoint_path)
-        print(f"正在从检查点恢复模型 B: {model2_checkpoint_path}")
+        print(f"正在从检查点恢复算法 B: {model2_checkpoint_path}")
         algo2 = Algorithm.from_checkpoint(model2_checkpoint_path)
         
-        # 【修改】从算法中获取主策略
+        # --- 获取主策略 ---
         policy1 = algo1.get_policy(MAIN_POLICY_ID)
         policy2 = algo2.get_policy(MAIN_POLICY_ID)
         
@@ -107,12 +122,13 @@ def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
         traceback.print_exc()
         return
 
-    eval_env = GameEnvironment()
+    # 使用底层的单智能体环境进行评估
+    eval_env = DarkChessEnv()
     scores = {'model1_wins': 0, 'model2_wins': 0, 'draws': 0, 'model1_as_red_wins': 0, 'model2_as_red_wins': 0}
 
     start_time = time.time()
     for i in tqdm(range(num_groups), desc="正在进行镜像对局评估"):
-        game_seed = int(time.time_ns() + i) % (2**32 - 1)
+        game_seed = int(time.time() * 1000 + i) % (2**32 - 1)
 
         winner_1 = play_one_game(eval_env, red_player=agent1, black_player=agent2, seed=game_seed)
         if winner_1 == 1: scores['model1_wins'] += 1; scores['model1_as_red_wins'] += 1
@@ -126,7 +142,8 @@ def evaluate_models(model1_checkpoint_path: str, model2_checkpoint_path: str):
             
     eval_env.close()
     end_time = time.time()
-
+    
+    # ... [结果打印部分保持不变] ...
     total_games = num_groups * 2
     total_decisive_games = scores['model1_wins'] + scores['model2_wins']
     win_rate_model1 = scores['model1_wins'] / total_decisive_games if total_decisive_games > 0 else 0.0

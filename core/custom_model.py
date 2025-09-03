@@ -2,54 +2,66 @@
 
 import torch
 from torch import nn
-import numpy as np
+from typing import Dict, Any, Optional
 
+from ray.rllib.core.rl_module.rl_module import RLModule
+from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.core.rl_module.apis import ValueFunctionAPI
+from ray.rllib.core.columns import Columns
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
-from ray.rllib.models.preprocessors import get_preprocessor
-from ray.rllib.models.torch.misc import normc_initializer
-from gymnasium.spaces import Box, Dict, Discrete
+from gymnasium.spaces import Dict as DictSpace
+from gymnasium.spaces import Space
+# 修复点: 移除了不存在的 RLModuleConfig 导入
 
-class CustomDarkChessModel(TorchModelV2, nn.Module):
+class CustomDarkChessRLModule(TorchRLModule, ValueFunctionAPI):
     """
-    自定义模型，用于处理由 "board" (图像) 和 "scalars" (向量) 组成的字典观察空间。
+    一个为暗棋设计的自定义 RLModule，适配 RLlib 的新版 RLModule API。
+    它处理由 "board" (图像) 和 "scalars" (向量) 组成的字典观察空间。
     """
-    def __init__(self, obs_space, action_space, num_outputs, model_config, name):
-        TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
-        nn.Module.__init__(self)
-
-        # 确保观察空间是 Dict 类型
-        assert isinstance(obs_space, Dict)
+    # 修复点: 更新 __init__ 签名并直接调用 super()
+    def __init__(
+        self,
+        observation_space: Space,
+        action_space: Space,
+        *,
+        model_config: Dict,
+        **kwargs,
+    ):
+        # 直接将关键字参数传递给父类构造函数
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            model_config=model_config,
+            **kwargs
+        )
+        
+        assert isinstance(observation_space, DictSpace)
         
         # --- 定义处理棋盘 (board) 的 CNN ---
-        board_space = obs_space["board"]
+        board_space = observation_space["board"]
         board_shape = board_space.shape
         self.board_cnn = nn.Sequential(
             nn.Conv2d(
-                in_channels=board_shape[0], # (channels, height, width)
+                in_channels=board_shape[0],
                 out_channels=32,
-                kernel_size=3,
-                stride=1,
-                padding=1,
+                kernel_size=3, stride=1, padding=1,
             ),
             nn.ReLU(),
             nn.Conv2d(
                 in_channels=32,
                 out_channels=64,
-                kernel_size=3,
-                stride=1,
-                padding=1,
+                kernel_size=3, stride=1, padding=1,
             ),
             nn.ReLU(),
             nn.Flatten(),
         )
         
-        # 计算 CNN 输出的大小
         with torch.no_grad():
             dummy_input = torch.zeros(1, *board_shape)
             cnn_output_size = self.board_cnn(dummy_input).shape[1]
 
         # --- 定义处理标量 (scalars) 的 MLP ---
-        scalars_space = obs_space["scalars"]
+        scalars_space = observation_space["scalars"]
         scalars_input_size = scalars_space.shape[0]
         self.scalars_mlp = nn.Sequential(
             nn.Linear(scalars_input_size, 128),
@@ -66,44 +78,50 @@ class CustomDarkChessModel(TorchModelV2, nn.Module):
         )
 
         # --- 策略头和价值头 ---
-        self.action_branch = nn.Linear(256, num_outputs)
+        self.action_branch = nn.Linear(256, action_space.n)
         self.value_branch = nn.Linear(256, 1)
         
-        # 初始化权重
         self.apply(self._init_weights)
-
+        
     def _init_weights(self, module):
-        if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
-
-
-    def forward(self, input_dict, state, seq_lens):
-        """
-        前向传播函数。
-        """
-        obs = input_dict["obs"]
-        
-        # 分别处理 board 和 scalars
+    
+    def _get_shared_features(self, batch: Dict[str, Any]) -> torch.Tensor:
+        obs = batch[Columns.OBS]
         board_features = self.board_cnn(obs["board"])
         scalar_features = self.scalars_mlp(obs["scalars"])
-        
-        # 拼接特征
         combined_features = torch.cat([board_features, scalar_features], dim=1)
-        
-        # 通过主干网络
-        model_out = self.combined_mlp(combined_features)
-        
-        # 计算动作 logits 和价值
-        self._last_features = model_out
-        logits = self.action_branch(model_out)
-        
-        return logits, state
+        return self.combined_mlp(combined_features)
 
-    def value_function(self):
-        """
-        返回当前观察的价值估计。
-        """
-        assert self._last_features is not None, "must call forward() first"
-        return torch.squeeze(self.value_branch(self._last_features), -1)
+    def _forward_inference(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        with torch.no_grad():
+            shared_features = self._get_shared_features(batch)
+            action_logits = self.action_branch(shared_features)
+            return {Columns.ACTION_DIST_INPUTS: action_logits}
+
+    def _forward_exploration(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        shared_features = self._get_shared_features(batch)
+        action_logits = self.action_branch(shared_features)
+        return {Columns.ACTION_DIST_INPUTS: action_logits}
+
+    def _forward_train(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        shared_features = self._get_shared_features(batch)
+        action_logits = self.action_branch(shared_features)
+        value_preds = torch.squeeze(self.value_branch(shared_features), -1)
+        
+        return {
+            Columns.ACTION_DIST_INPUTS: action_logits,
+            Columns.VF_PREDS: value_preds
+        }
+    
+    def compute_values(self, batch: Dict[str, Any]) -> torch.Tensor:
+        features = self._get_shared_features(batch)
+        return torch.squeeze(self.value_branch(features), -1)
+
+# --- 保留旧版 ModelV2 API 以供参考 ---
+class CustomDarkChessModel(TorchModelV2, nn.Module):
+    # ... (旧代码保持不变) ...
+    pass

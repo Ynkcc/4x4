@@ -201,7 +201,8 @@ class DarkChessEnv(gym.Env):
 
     def _internal_apply_action(self, action_index: int) -> Tuple[float, bool, bool, Optional[int]]:
         """应用一个动作并更新游戏状态，返回结果。"""
-        #if not self.action_masks()[action_index]: raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
+        if not self.action_masks()[action_index]: 
+            raise ValueError(f"错误：试图执行无效动作! 索引: {action_index}")
 
         self.last_action = action_index
         self.total_step_counter += 1
@@ -238,9 +239,9 @@ class DarkChessEnv(gym.Env):
         """应用移动或吃子动作，返回塑形奖励"""
         attacker = self.board[from_sq]
         defender = self.board[to_sq]
-        self.board[to_sq], self.board[from_sq] = attacker, None
         
         assert attacker is not None, f"试图移动空位置 {from_sq} 的棋子"
+        self.board[to_sq], self.board[from_sq] = attacker, None
         self._update_vectors_for_move(attacker.player, attacker.piece_type, from_sq, to_sq)
         if defender is None:
             self.move_counter += 1
